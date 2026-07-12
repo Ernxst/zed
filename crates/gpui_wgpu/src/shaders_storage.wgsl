@@ -5,6 +5,7 @@
 // All buffers share `@group(1) @binding(0)` because each pipeline binds only the
 // buffer its own entry points read.
 
+@group(0) @binding(2) var<storage, read> b_clips: array<ClipNode>;
 @group(1) @binding(0) var<storage, read> b_quads: array<Quad>;
 @group(1) @binding(0) var<storage, read> b_shadows: array<Shadow>;
 @group(1) @binding(0) var<storage, read> b_path_vertices: array<PathRasterizationVertex>;
@@ -12,6 +13,10 @@
 @group(1) @binding(0) var<storage, read> b_underlines: array<Underline>;
 @group(1) @binding(0) var<storage, read> b_mono_sprites: array<MonochromeSprite>;
 @group(1) @binding(0) var<storage, read> b_poly_sprites: array<PolychromeSprite>;
+
+fn load_clip(clip_id: u32) -> ClipNode {
+    return b_clips[clip_id];
+}
 
 fn load_quad(instance_id: u32) -> Quad {
     return b_quads[instance_id];

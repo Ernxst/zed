@@ -1,3 +1,4 @@
+@group(0) @binding(2) var t_clips: texture_2d<u32>;
 @group(1) @binding(0) var t_instances: texture_2d<u32>;
 
 // Each texel of `t_instances` packs four 32-bit words of instance data. Records
@@ -83,6 +84,75 @@ fn read_corners(cursor: ptr<function, InstanceCursor>) -> Corners {
     );
 }
 
+struct ClipCursor {
+    word_index: u32,
+    texel_index: u32,
+    texel: vec4<u32>,
+    width: u32,
+}
+
+fn fetch_clip_texel(texel_index: u32, width: u32) -> vec4<u32> {
+    let coordinate = vec2<i32>(
+        i32(texel_index % width),
+        i32(texel_index / width),
+    );
+    return textureLoad(t_clips, coordinate, 0);
+}
+
+fn clip_cursor(word_index: u32) -> ClipCursor {
+    let width = textureDimensions(t_clips).x;
+    let texel_index = word_index / 4u;
+    return ClipCursor(
+        word_index,
+        texel_index,
+        fetch_clip_texel(texel_index, width),
+        width,
+    );
+}
+
+fn read_clip_word(cursor: ptr<function, ClipCursor>) -> u32 {
+    let word_index = (*cursor).word_index;
+    let texel_index = word_index / 4u;
+    if texel_index != (*cursor).texel_index {
+        (*cursor).texel = fetch_clip_texel(texel_index, (*cursor).width);
+        (*cursor).texel_index = texel_index;
+    }
+    (*cursor).word_index = word_index + 1u;
+    return (*cursor).texel[word_index % 4u];
+}
+
+fn read_clip_f32(cursor: ptr<function, ClipCursor>) -> f32 {
+    return bitcast<f32>(read_clip_word(cursor));
+}
+
+fn read_clip_vec2_f32(cursor: ptr<function, ClipCursor>) -> vec2<f32> {
+    return vec2<f32>(read_clip_f32(cursor), read_clip_f32(cursor));
+}
+
+fn read_clip_bounds(cursor: ptr<function, ClipCursor>) -> Bounds {
+    return Bounds(read_clip_vec2_f32(cursor), read_clip_vec2_f32(cursor));
+}
+
+fn read_clip_corners(cursor: ptr<function, ClipCursor>) -> Corners {
+    return Corners(
+        read_clip_f32(cursor),
+        read_clip_f32(cursor),
+        read_clip_f32(cursor),
+        read_clip_f32(cursor),
+    );
+}
+
+fn load_clip(clip_id: u32) -> ClipNode {
+    var cursor = clip_cursor(clip_id * 14u);
+    return ClipNode(
+        read_clip_bounds(&cursor),
+        read_clip_bounds(&cursor),
+        read_clip_corners(&cursor),
+        read_clip_word(&cursor),
+        read_clip_word(&cursor),
+    );
+}
+
 fn read_edges(cursor: ptr<function, InstanceCursor>) -> Edges {
     return Edges(
         read_f32(cursor),
@@ -142,12 +212,13 @@ fn read_transformation(cursor: ptr<function, InstanceCursor>) -> TransformationM
 }
 
 fn load_quad(instance_id: u32) -> Quad {
-    var cursor = instance_cursor(instance_id * 70u);
+    var cursor = instance_cursor(instance_id * 68u);
     return Quad(
         read_word(&cursor),
         read_word(&cursor),
         read_bounds(&cursor),
-        read_bounds(&cursor),
+        read_word(&cursor),
+        read_word(&cursor),
         read_background(&cursor),
         read_hsla(&cursor),
         read_corners(&cursor),
@@ -156,13 +227,12 @@ fn load_quad(instance_id: u32) -> Quad {
 }
 
 fn load_shadow(instance_id: u32) -> Shadow {
-    var cursor = instance_cursor(instance_id * 28u);
+    var cursor = instance_cursor(instance_id * 24u);
     return Shadow(
         read_word(&cursor),
         read_f32(&cursor),
         read_bounds(&cursor),
         read_corners(&cursor),
-        read_bounds(&cursor),
         read_hsla(&cursor),
         read_bounds(&cursor),
         read_corners(&cursor),
@@ -172,12 +242,14 @@ fn load_shadow(instance_id: u32) -> Shadow {
 }
 
 fn load_path_vertex(vertex_id: u32) -> PathRasterizationVertex {
-    var cursor = instance_cursor(vertex_id * 56u);
+    var cursor = instance_cursor(vertex_id * 58u);
     return PathRasterizationVertex(
         read_vec2_f32(&cursor),
         read_vec2_f32(&cursor),
         read_background(&cursor),
         read_bounds(&cursor),
+        read_word(&cursor),
+        read_word(&cursor),
     );
 }
 
@@ -187,11 +259,10 @@ fn load_path_sprite(instance_id: u32) -> PathSprite {
 }
 
 fn load_underline(instance_id: u32) -> Underline {
-    var cursor = instance_cursor(instance_id * 16u);
+    var cursor = instance_cursor(instance_id * 12u);
     return Underline(
         read_word(&cursor),
         read_word(&cursor),
-        read_bounds(&cursor),
         read_bounds(&cursor),
         read_hsla(&cursor),
         read_f32(&cursor),
@@ -200,11 +271,10 @@ fn load_underline(instance_id: u32) -> Underline {
 }
 
 fn load_mono_sprite(instance_id: u32) -> MonochromeSprite {
-    var cursor = instance_cursor(instance_id * 28u);
+    var cursor = instance_cursor(instance_id * 24u);
     return MonochromeSprite(
         read_word(&cursor),
         read_word(&cursor),
-        read_bounds(&cursor),
         read_bounds(&cursor),
         read_hsla(&cursor),
         read_atlas_tile(&cursor),
@@ -213,13 +283,12 @@ fn load_mono_sprite(instance_id: u32) -> MonochromeSprite {
 }
 
 fn load_poly_sprite(instance_id: u32) -> PolychromeSprite {
-    var cursor = instance_cursor(instance_id * 24u);
+    var cursor = instance_cursor(instance_id * 20u);
     return PolychromeSprite(
         read_word(&cursor),
         read_word(&cursor),
         read_word(&cursor),
         read_f32(&cursor),
-        read_bounds(&cursor),
         read_bounds(&cursor),
         read_corners(&cursor),
         read_atlas_tile(&cursor),

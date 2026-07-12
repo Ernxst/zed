@@ -2,8 +2,8 @@ use crate::{CompositorGpuHint, WgpuAtlas, WgpuContext};
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
 use gpui::{
-    AtlasTextureId, Background, Bounds, DevicePixels, GpuSpecs, Path, Point, PrimitiveBatch,
-    ScaledPixels, Scene, Size, get_gamma_correction_ratios,
+    AtlasTextureId, Background, Bounds, ClipNode, DevicePixels, GpuSpecs, Path, Point,
+    PrimitiveBatch, ScaledPixels, Scene, Size, get_gamma_correction_ratios,
 };
 use log::warn;
 #[cfg(not(target_family = "wasm"))]
@@ -107,6 +107,9 @@ struct PathRasterizationVertex {
     st_position: Point<f32>,
     color: Background,
     bounds: Bounds<ScaledPixels>,
+    /// The nearest rounded clip node for this path, or [`ClipNode::NONE`].
+    rounded_head: u32,
+    pad: u32,
 }
 
 pub struct WgpuSurfaceConfig {
@@ -506,51 +509,15 @@ impl WgpuRenderer {
             )
         };
 
-        let globals_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("globals_bind_group"),
-            layout: &bind_group_layouts.globals,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &globals_buffer,
-                        offset: 0,
-                        size: Some(NonZeroU64::new(globals_size).unwrap()),
-                    }),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &globals_buffer,
-                        offset: gamma_offset,
-                        size: Some(NonZeroU64::new(gamma_size).unwrap()),
-                    }),
-                },
-            ],
-        });
-
-        let path_globals_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("path_globals_bind_group"),
-            layout: &bind_group_layouts.globals,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &globals_buffer,
-                        offset: path_globals_offset,
-                        size: Some(NonZeroU64::new(globals_size).unwrap()),
-                    }),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &globals_buffer,
-                        offset: gamma_offset,
-                        size: Some(NonZeroU64::new(gamma_size).unwrap()),
-                    }),
-                },
-            ],
-        });
+        let (globals_bind_group, path_globals_bind_group) = Self::create_globals_bind_groups(
+            &device,
+            &bind_group_layouts,
+            &globals_buffer,
+            path_globals_offset,
+            gamma_offset,
+            &instance_data,
+            16,
+        );
 
         let adapter_info = context.adapter.get_info();
 
@@ -607,6 +574,62 @@ impl WgpuRenderer {
         })
     }
 
+    fn create_globals_bind_groups(
+        device: &wgpu::Device,
+        bind_group_layouts: &WgpuBindGroupLayouts,
+        globals_buffer: &wgpu::Buffer,
+        path_globals_offset: u64,
+        gamma_offset: u64,
+        instance_data: &InstanceData,
+        clips_size: u64,
+    ) -> (wgpu::BindGroup, wgpu::BindGroup) {
+        let globals_size = std::mem::size_of::<GlobalParams>() as u64;
+        let gamma_size = std::mem::size_of::<GammaParams>() as u64;
+        let create = |label: &str, globals_offset: u64| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout: &bind_group_layouts.globals,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: globals_buffer,
+                            offset: globals_offset,
+                            size: Some(NonZeroU64::new(globals_size).unwrap()),
+                        }),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: globals_buffer,
+                            offset: gamma_offset,
+                            size: Some(NonZeroU64::new(gamma_size).unwrap()),
+                        }),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: match instance_data {
+                            InstanceData::Storage(buffer) => {
+                                wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                    buffer,
+                                    offset: 0,
+                                    size: NonZeroU64::new(clips_size.max(16)),
+                                })
+                            }
+                            InstanceData::Texture { view, .. } => {
+                                wgpu::BindingResource::TextureView(view)
+                            }
+                        },
+                    },
+                ],
+            })
+        };
+        (
+            create("globals_bind_group", 0),
+            create("path_globals_bind_group", path_globals_offset),
+        )
+    }
+
     fn create_bind_group_layouts(
         device: &wgpu::Device,
         uses_webgl_instance_data: bool,
@@ -636,6 +659,25 @@ impl WgpuRenderer {
                             min_binding_size: NonZeroU64::new(
                                 std::mem::size_of::<GammaParams>() as u64
                             ),
+                        },
+                        count: None,
+                    },
+                    // The scene's clip nodes, shared by all pipelines.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: if uses_webgl_instance_data {
+                            wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Uint,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            }
+                        } else {
+                            wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            }
                         },
                         count: None,
                     },
@@ -1392,7 +1434,16 @@ impl WgpuRenderer {
             );
         }
 
-        if let Err(error) = self.record_frame(scene, &frame_view) {
+        let instance_offset = match self.upload_clips(&scene.clips) {
+            Ok(offset) => offset,
+            Err(error) => {
+                log::error!("{error:#}");
+                self.resources().queue.submit(std::iter::empty());
+                return false;
+            }
+        };
+
+        if let Err(error) = self.record_frame(scene, &frame_view, instance_offset) {
             log::error!("{error:#}");
             self.resources().queue.submit(std::iter::empty());
             return false;
@@ -1402,8 +1453,12 @@ impl WgpuRenderer {
         true
     }
 
-    fn record_frame(&mut self, scene: &Scene, frame_view: &wgpu::TextureView) -> Result<()> {
-        let mut instance_offset = 0;
+    fn record_frame(
+        &mut self,
+        scene: &Scene,
+        frame_view: &wgpu::TextureView,
+        mut instance_offset: u64,
+    ) -> Result<()> {
         let instance_bindings = self
             .write_instances(scene, &mut instance_offset)
             .with_context(|| {
@@ -1466,6 +1521,7 @@ impl WgpuRenderer {
                         let rasterized = self.draw_paths_to_intermediate(
                             &mut encoder,
                             paths,
+                            &scene.clips,
                             &mut instance_offset,
                         )?;
 
@@ -1703,16 +1759,22 @@ impl WgpuRenderer {
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         paths: &[Path<ScaledPixels>],
+        clips: &[ClipNode],
         instance_offset: &mut u64,
     ) -> Result<bool> {
         let mut vertices = Vec::new();
         for path in paths {
             let bounds = path.clipped_bounds();
+            let rounded_head = clips
+                .get(path.clip_id as usize)
+                .map_or(ClipNode::NONE, |node| node.rounded_head);
             vertices.extend(path.vertices.iter().map(|v| PathRasterizationVertex {
                 xy_position: v.xy_position,
                 st_position: v.st_position,
                 color: path.color,
                 bounds,
+                rounded_head,
+                pad: 0,
             }));
         }
 
@@ -1767,6 +1829,50 @@ impl WgpuRenderer {
         }
 
         Ok(true)
+    }
+
+    fn upload_clips(&mut self, clips: &[ClipNode]) -> Result<u64> {
+        let data = unsafe { Self::instance_bytes(clips) };
+        let size = (data.len() as u64).max(16);
+        let allocation_size = if self.uses_webgl_instance_data {
+            size.next_multiple_of(INSTANCE_TEXTURE_TEXEL_SIZE)
+        } else {
+            size
+        };
+
+        if allocation_size > self.instance_data_capacity {
+            self.grow_instance_data(allocation_size)?;
+        }
+
+        {
+            let resources = self.resources();
+            if !data.is_empty() {
+                match &resources.instance_data {
+                    InstanceData::Storage(buffer) => resources.queue.write_buffer(buffer, 0, data),
+                    InstanceData::Texture { .. } => {
+                        Self::write_instance_texture(resources, 0, data)
+                    }
+                }
+            }
+        }
+
+        let (globals_bind_group, path_globals_bind_group) = {
+            let resources = self.resources();
+            Self::create_globals_bind_groups(
+                &resources.device,
+                &resources.bind_group_layouts,
+                &resources.globals_buffer,
+                self.path_globals_offset,
+                self.gamma_offset,
+                &resources.instance_data,
+                size,
+            )
+        };
+        let resources = self.resources_mut();
+        resources.globals_bind_group = globals_bind_group;
+        resources.path_globals_bind_group = path_globals_bind_group;
+
+        Ok(allocation_size)
     }
 
     fn write_instance_binding<T>(
@@ -2231,13 +2337,14 @@ mod tests {
 
     #[test]
     fn webgl_record_sizes_match_shader_word_strides() {
-        assert_eq!(std::mem::size_of::<Quad>(), 70 * 4);
-        assert_eq!(std::mem::size_of::<Shadow>(), 28 * 4);
-        assert_eq!(std::mem::size_of::<PathRasterizationVertex>(), 56 * 4);
+        assert_eq!(std::mem::size_of::<ClipNode>(), 14 * 4);
+        assert_eq!(std::mem::size_of::<Quad>(), 68 * 4);
+        assert_eq!(std::mem::size_of::<Shadow>(), 24 * 4);
+        assert_eq!(std::mem::size_of::<PathRasterizationVertex>(), 58 * 4);
         assert_eq!(std::mem::size_of::<PathSprite>(), 4 * 4);
-        assert_eq!(std::mem::size_of::<Underline>(), 16 * 4);
-        assert_eq!(std::mem::size_of::<MonochromeSprite>(), 28 * 4);
-        assert_eq!(std::mem::size_of::<SubpixelSprite>(), 28 * 4);
-        assert_eq!(std::mem::size_of::<PolychromeSprite>(), 24 * 4);
+        assert_eq!(std::mem::size_of::<Underline>(), 12 * 4);
+        assert_eq!(std::mem::size_of::<MonochromeSprite>(), 24 * 4);
+        assert_eq!(std::mem::size_of::<SubpixelSprite>(), 24 * 4);
+        assert_eq!(std::mem::size_of::<PolychromeSprite>(), 20 * 4);
     }
 }

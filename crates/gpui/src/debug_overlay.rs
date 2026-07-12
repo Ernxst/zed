@@ -3,8 +3,8 @@
 //! infinitely triggering new frames).
 
 use crate::{
-    BorderStyle, Bounds, ContentMask, Corners, Edges, Hsla, Pixels, Quad, ScaledPixels, Scene,
-    Size, point, rgba, size, transparent_black,
+    BorderStyle, Bounds, ClipNode, Corners, Edges, Hsla, Pixels, Quad, ScaledPixels, Scene, Size,
+    point, rgba, size, transparent_black,
 };
 use std::{collections::VecDeque, time::Duration};
 
@@ -136,16 +136,20 @@ impl DebugFrameOverlay {
         let panel_left = viewport.width.0 - panel_width - cell * PANEL_MARGIN;
         let panel_top = cell * PANEL_MARGIN;
 
-        let content_mask = ContentMask {
-            bounds: Bounds {
+        let clip_id = scene.insert_clip(ClipNode {
+            folded_bounds: Bounds {
                 origin: point(ScaledPixels(0.), ScaledPixels(0.)),
                 size: viewport,
             },
-        };
+            rounded_bounds: Bounds::default(),
+            corner_radii: Corners::default(),
+            rounded_head: ClipNode::NONE,
+            parent_rounded: ClipNode::NONE,
+        });
 
         scene.insert_primitive(solid_quad(
             scaled_bounds(panel_left, panel_top, panel_width, panel_height),
-            &content_mask,
+            clip_id,
             panel_color(),
         ));
 
@@ -178,7 +182,7 @@ impl DebugFrameOverlay {
                                 cell * (column - run_start) as f32,
                                 cell,
                             ),
-                            &content_mask,
+                            clip_id,
                             text_color,
                         ));
                     }
@@ -238,16 +242,13 @@ fn scaled_bounds(left: f32, top: f32, width: f32, height: f32) -> Bounds<ScaledP
     }
 }
 
-fn solid_quad(
-    bounds: Bounds<ScaledPixels>,
-    content_mask: &ContentMask<ScaledPixels>,
-    color: Hsla,
-) -> Quad {
+fn solid_quad(bounds: Bounds<ScaledPixels>, clip_id: u32, color: Hsla) -> Quad {
     Quad {
         order: 0,
         border_style: BorderStyle::Solid,
         bounds,
-        content_mask: *content_mask,
+        clip_id,
+        pad: 0,
         background: color.into(),
         border_color: transparent_black(),
         corner_radii: Corners::default(),

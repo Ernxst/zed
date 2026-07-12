@@ -7,7 +7,7 @@ use cocoa::{
     quartzcore::AutoresizingMask,
 };
 use gpui::{
-    AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, PaintSurface, Path, Point,
+    AtlasTextureId, Background, Bounds, ClipNode, DevicePixels, PaintSurface, Path, Point,
     PrimitiveBatch, ScaledPixels, Scene, Size, point, size,
 };
 #[cfg(any(test, feature = "test-support"))]
@@ -146,6 +146,9 @@ pub struct PathRasterizationVertex {
     pub st_position: Point<f32>,
     pub color: Background,
     pub bounds: Bounds<ScaledPixels>,
+    /// The nearest rounded clip node for this path, or [`ClipNode::NONE`].
+    pub rounded_head: u32,
+    pub pad: u32,
 }
 
 impl MetalRenderer {
@@ -660,12 +663,17 @@ impl MetalRenderer {
         let command_buffer = command_queue.new_command_buffer();
         let alpha = if self.opaque { 1. } else { 0. };
 
+        // Upload the scene's clip nodes once; they are bound on every command encoder
+        // so all pipelines can evaluate rounded clips.
+        let clips = writer.write(&scene.clips)?;
+
         let mut command_encoder = new_command_encoder_for_texture(
             command_buffer,
             texture,
             viewport_size,
             Some(metal::MTLClearColor::new(0., 0., 0., alpha)),
         );
+        bind_clips(command_encoder, &clips);
 
         for batch in scene.batches() {
             match batch {
@@ -681,7 +689,9 @@ impl MetalRenderer {
 
                     let did_draw = self.draw_paths_to_intermediate(
                         paths,
+                        &scene.clips,
                         writer,
+                        &clips,
                         viewport_size,
                         command_buffer,
                     )?;
@@ -692,6 +702,7 @@ impl MetalRenderer {
                         viewport_size,
                         None,
                     );
+                    bind_clips(command_encoder, &clips);
 
                     if did_draw {
                         if let Err(error) = self.draw_paths_from_intermediate(
@@ -743,7 +754,9 @@ impl MetalRenderer {
     fn draw_paths_to_intermediate(
         &self,
         paths: &[Path<ScaledPixels>],
+        clips: &[ClipNode],
         writer: &mut InstanceBufferWriter,
+        clip_binding: &InstanceBinding,
         viewport_size: Size<DevicePixels>,
         command_buffer: &metal::CommandBufferRef,
     ) -> Result<bool> {
@@ -757,11 +770,16 @@ impl MetalRenderer {
 
         let mut vertices = Vec::new();
         for path in paths {
+            let rounded_head = clips
+                .get(path.clip_id as usize)
+                .map_or(ClipNode::NONE, |node| node.rounded_head);
             vertices.extend(path.vertices.iter().map(|v| PathRasterizationVertex {
                 xy_position: v.xy_position,
                 st_position: v.st_position,
                 color: path.color,
-                bounds: path.bounds.intersect(&path.content_mask.bounds),
+                bounds: path.clipped_bounds(),
+                rounded_head,
+                pad: 0,
             }));
         }
         let vertex_instance_bindings = writer.write(&vertices)?;
@@ -785,6 +803,7 @@ impl MetalRenderer {
 
         let command_encoder = command_buffer.new_render_command_encoder(render_pass_descriptor);
         command_encoder.set_render_pipeline_state(&self.paths_rasterization_pipeline_state);
+        bind_clips(command_encoder, clip_binding);
         command_encoder.set_vertex_buffer(
             PathRasterizationInputIndex::Vertices as u64,
             Some(&vertex_instance_bindings.buffer),
@@ -1397,7 +1416,8 @@ fn write_instances(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<I
         polychrome_sprites: writer.write(&scene.polychrome_sprites)?,
         surfaces: writer.write_iter(scene.surfaces.iter().map(|surface| SurfaceBounds {
             bounds: surface.bounds,
-            content_mask: surface.content_mask,
+            clip_id: surface.clip_id,
+            pad: 0,
         }))?,
     })
 }
@@ -1533,6 +1553,22 @@ impl InstanceBufferWriter {
     }
 }
 
+/// Bind the scene's clip nodes (uploaded at the start of the frame) to the given
+/// command encoder. Buffer bindings persist across pipeline changes within an
+/// encoder, so this only needs to happen once per encoder.
+fn bind_clips(command_encoder: &metal::RenderCommandEncoderRef, clips: &InstanceBinding) {
+    command_encoder.set_vertex_buffer(
+        ClipsInputIndex::Clips as u64,
+        Some(&clips.buffer),
+        clips.offset as u64,
+    );
+    command_encoder.set_fragment_buffer(
+        ClipsInputIndex::Clips as u64,
+        Some(&clips.buffer),
+        clips.offset as u64,
+    );
+}
+
 #[repr(C)]
 enum ShadowInputIndex {
     Vertices = 0,
@@ -1579,6 +1615,13 @@ enum PathRasterizationInputIndex {
     ViewportSize = 1,
 }
 
+/// The scene's clip nodes are bound once per command encoder at a fixed index that
+/// no pipeline uses for anything else, so every pipeline can read them.
+#[repr(C)]
+enum ClipsInputIndex {
+    Clips = 8,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[repr(C)]
 pub struct PathSprite {
@@ -1589,7 +1632,8 @@ pub struct PathSprite {
 #[repr(C)]
 pub struct SurfaceBounds {
     pub bounds: Bounds<ScaledPixels>,
-    pub content_mask: ContentMask<ScaledPixels>,
+    pub clip_id: u32,
+    pub pad: u32,
 }
 
 #[cfg(any(test, feature = "test-support"))]

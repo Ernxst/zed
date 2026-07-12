@@ -1281,8 +1281,12 @@ impl StateInner {
             if bounds.size.height > padding.top + padding.bottom {
                 let mut item_origin = bounds.origin + Point::new(px(0.), padding.top);
                 item_origin.y -= layout_response.scroll_top.offset_in_item;
+                let content_mask = ContentMask {
+                    bounds,
+                    ..Default::default()
+                };
                 for item in &mut layout_response.item_layouts {
-                    window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                    window.with_content_mask(Some(content_mask), |window| {
                         item.element.prepaint_at(item_origin, window, cx);
                     });
 
@@ -1615,11 +1619,17 @@ impl Element for List {
             }
         });
 
-        window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            for item in &mut prepaint.layout.item_layouts {
-                item.element.paint(window, cx);
-            }
-        });
+        window.with_content_mask(
+            Some(ContentMask {
+                bounds,
+                ..Default::default()
+            }),
+            |window| {
+                for item in &mut prepaint.layout.item_layouts {
+                    item.element.paint(window, cx);
+                }
+            },
+        );
     }
 }
 
