@@ -772,11 +772,37 @@ impl Platform for MacPlatform {
         // this, we make quitting the application asynchronous so that we aren't holding borrows to
         // the app state on the stack when we actually terminate the app.
 
-        unsafe {
-            DispatchQueue::main().exec_async_f(ptr::null_mut(), quit);
-        }
+        let platform_ptr = self as *const Self as *mut c_void;
+        unsafe { DispatchQueue::main().exec_async_f(platform_ptr, quit) }
 
-        extern "C" fn quit(_: *mut c_void) {
+        extern "C" fn quit(context: *mut c_void) {
+            let Some(platform) = registered_mac_platform(context) else {
+                return;
+            };
+
+            let (embedded, callback) = {
+                let mut state = platform.0.lock();
+                match state.mode {
+                    MacPlatformMode::Blocking => (false, None),
+                    MacPlatformMode::Embedded(EmbeddedLifecycle::Terminated) => return,
+                    MacPlatformMode::Embedded(_) => {
+                        state.mode = MacPlatformMode::Embedded(EmbeddedLifecycle::Terminated);
+                        (true, state.quit.take())
+                    }
+                }
+            };
+
+            if embedded {
+                // An embedded application belongs to its host process. Running GPUI's shutdown
+                // callback drops the windows and completes app-quit observers; stopping AppKit
+                // then returns control to the host instead of NSApplication terminating it.
+                if let Some(mut callback) = callback {
+                    callback();
+                }
+                unsafe { stop_app_immediately() };
+                return;
+            }
+
             unsafe {
                 let app = NSApplication::sharedApplication(nil);
                 let _: () = msg_send![app, terminate: nil];
