@@ -138,40 +138,75 @@ impl ObjectFit {
     }
 }
 
-/// The minimum size of a column or row in a grid layout
-#[derive(
-    Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default, JsonSchema, Serialize, Deserialize,
-)]
-pub enum GridTemplateMinSize {
-    /// The column or row size may be 0
-    #[default]
-    Zero,
-    /// The column or row size can be determined by the min content
+/// A single CSS Grid track sizing function.
+#[derive(Clone, PartialEq, Debug, JsonSchema, Serialize, Deserialize)]
+pub enum GridTrack {
+    /// A fixed pixel track.
+    Px(Pixels),
+    /// A flexible fraction of the remaining space.
+    Fr(f32),
+    /// A track sized by the grid algorithm.
+    Auto,
+    /// A track sized to its minimum content contribution.
     MinContent,
-    /// The column or row size can be determined by the max content
+    /// A track sized to its maximum content contribution.
+    MaxContent,
+    /// A track with independent lower and upper sizing bounds.
+    MinMax {
+        /// The lower bound.
+        min: GridTrackMin,
+        /// The upper bound.
+        max: GridTrackMax,
+    },
+}
+
+/// A valid lower bound of a CSS Grid `minmax()` track.
+#[derive(Clone, PartialEq, Debug, JsonSchema, Serialize, Deserialize)]
+pub enum GridTrackMin {
+    /// A fixed pixel lower bound.
+    Px(Pixels),
+    /// An automatically sized lower bound.
+    Auto,
+    /// A minimum-content lower bound.
+    MinContent,
+    /// A maximum-content lower bound.
     MaxContent,
 }
 
-/// A simplified representation of the grid-template-* value
-#[derive(
-    Copy,
-    Clone,
-    Refineable,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Debug,
-    Default,
-    JsonSchema,
-    Serialize,
-    Deserialize,
-)]
+/// A valid upper bound of a CSS Grid `minmax()` track.
+#[derive(Clone, PartialEq, Debug, JsonSchema, Serialize, Deserialize)]
+pub enum GridTrackMax {
+    /// A fixed pixel upper bound.
+    Px(Pixels),
+    /// A flexible fraction upper bound.
+    Fr(f32),
+    /// An automatically sized upper bound.
+    Auto,
+    /// A minimum-content upper bound.
+    MinContent,
+    /// A maximum-content upper bound.
+    MaxContent,
+}
+
+/// One component of a CSS Grid `grid-template-*` track list.
+#[derive(Clone, PartialEq, Debug, JsonSchema, Serialize, Deserialize)]
+pub enum GridTemplateComponent {
+    /// A single track.
+    Track(GridTrack),
+    /// A sequence of tracks repeated an exact number of times.
+    Repeat {
+        /// The number of repetitions.
+        count: u16,
+        /// The tracks in each repetition.
+        tracks: Vec<GridTrack>,
+    },
+}
+
+/// A CSS Grid `grid-template-columns` or `grid-template-rows` track list.
+#[derive(Clone, Refineable, PartialEq, Debug, Default, JsonSchema, Serialize, Deserialize)]
 pub struct GridTemplate {
-    /// How this template directive should be repeated
-    pub repeat: u16,
-    /// The minimum size in the repeat(<>, minmax(_, 1fr)) equation
-    pub min_size: GridTemplateMinSize,
+    /// The ordered track components.
+    pub tracks: Vec<GridTemplateComponent>,
 }
 
 /// The CSS styling that can be applied to an element via the `Styled` trait

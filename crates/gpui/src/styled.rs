@@ -1,9 +1,10 @@
 use crate::{
     self as gpui, AbsoluteLength, AlignContent, AlignItems, AlignSelf, BorderStyle, CursorStyle,
     DefiniteLength, Display, Fill, FlexDirection, FlexWrap, Font, FontFeatures, FontStyle,
-    FontWeight, GridPlacement, GridTemplate, GridTemplateMinSize, Hsla, JustifyContent, Length,
-    Pixels, SharedString, StrikethroughStyle, StyleRefinement, TextAlign, TextOverflow,
-    TextStyleRefinement, UnderlineStyle, WhiteSpace, px, relative, rems,
+    FontWeight, GridPlacement, GridTemplate, GridTemplateComponent, GridTrack, GridTrackMax,
+    GridTrackMin, Hsla, JustifyContent, Length, Pixels, SharedString, StrikethroughStyle,
+    StyleRefinement, TextAlign, TextOverflow, TextStyleRefinement, UnderlineStyle, WhiteSpace, px,
+    relative, rems,
 };
 pub use gpui_macros::{
     border_style_methods, box_shadow_style_methods, cursor_style_methods, margin_style_methods,
@@ -11,6 +12,15 @@ pub use gpui_macros::{
     visibility_style_methods,
 };
 const ELLIPSIS: SharedString = SharedString::new_static("…");
+
+fn repeated_grid_tracks(count: u16, track: GridTrack) -> GridTemplate {
+    GridTemplate {
+        tracks: vec![GridTemplateComponent::Repeat {
+            count,
+            tracks: vec![track],
+        }],
+    }
+}
 
 /// A trait for elements that can be styled.
 /// Use this to opt-in to a utility CSS-like styling API.
@@ -756,57 +766,87 @@ pub trait Styled: Sized {
 
     /// Sets the grid columns of this element.
     fn grid_cols(mut self, cols: u16) -> Self {
-        self.style().grid_cols = Some(GridTemplate {
-            repeat: cols,
-            min_size: GridTemplateMinSize::Zero,
-        });
+        self.style().grid_cols = Some(repeated_grid_tracks(
+            cols,
+            GridTrack::MinMax {
+                min: GridTrackMin::Px(px(0.)),
+                max: GridTrackMax::Fr(1.),
+            },
+        ));
         self
     }
 
     /// Sets the grid columns with min-content minimum sizing.
     /// Unlike grid_cols, it won't shrink to width 0 in AvailableSpace::MinContent constraints.
     fn grid_cols_min_content(mut self, cols: u16) -> Self {
-        self.style().grid_cols = Some(GridTemplate {
-            repeat: cols,
-            min_size: GridTemplateMinSize::MinContent,
-        });
+        self.style().grid_cols = Some(repeated_grid_tracks(
+            cols,
+            GridTrack::MinMax {
+                min: GridTrackMin::MinContent,
+                max: GridTrackMax::Fr(1.),
+            },
+        ));
         self
     }
 
     /// Sets the grid columns with max-content maximum sizing for content-based column widths.
     fn grid_cols_max_content(mut self, cols: u16) -> Self {
-        self.style().grid_cols = Some(GridTemplate {
-            repeat: cols,
-            min_size: GridTemplateMinSize::MaxContent,
-        });
+        self.style().grid_cols = Some(repeated_grid_tracks(
+            cols,
+            GridTrack::MinMax {
+                min: GridTrackMin::Px(px(0.)),
+                max: GridTrackMax::MaxContent,
+            },
+        ));
         self
     }
 
     /// Sets the grid rows of this element.
     fn grid_rows(mut self, rows: u16) -> Self {
-        self.style().grid_rows = Some(GridTemplate {
-            repeat: rows,
-            min_size: GridTemplateMinSize::Zero,
-        });
+        self.style().grid_rows = Some(repeated_grid_tracks(
+            rows,
+            GridTrack::MinMax {
+                min: GridTrackMin::Px(px(0.)),
+                max: GridTrackMax::Fr(1.),
+            },
+        ));
         self
     }
 
     /// Sets the grid rows with min-content minimum sizing.
     /// Unlike grid_rows, it won't shrink to height 0 in AvailableSpace::MinContent constraints.
     fn grid_rows_min_content(mut self, rows: u16) -> Self {
-        self.style().grid_rows = Some(GridTemplate {
-            repeat: rows,
-            min_size: GridTemplateMinSize::MinContent,
-        });
+        self.style().grid_rows = Some(repeated_grid_tracks(
+            rows,
+            GridTrack::MinMax {
+                min: GridTrackMin::MinContent,
+                max: GridTrackMax::Fr(1.),
+            },
+        ));
         self
     }
 
     /// Sets the grid rows with max-content maximum sizing for content-based row heights.
     fn grid_rows_max_content(mut self, rows: u16) -> Self {
-        self.style().grid_rows = Some(GridTemplate {
-            repeat: rows,
-            min_size: GridTemplateMinSize::MaxContent,
-        });
+        self.style().grid_rows = Some(repeated_grid_tracks(
+            rows,
+            GridTrack::MinMax {
+                min: GridTrackMin::Px(px(0.)),
+                max: GridTrackMax::MaxContent,
+            },
+        ));
+        self
+    }
+
+    /// Sets a complete CSS Grid column track list.
+    fn grid_template_columns(mut self, template: GridTemplate) -> Self {
+        self.style().grid_cols = Some(template);
+        self
+    }
+
+    /// Sets a complete CSS Grid row track list.
+    fn grid_template_rows(mut self, template: GridTemplate) -> Self {
+        self.style().grid_rows = Some(template);
         self
     }
 

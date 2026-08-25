@@ -1,6 +1,6 @@
 use crate::{
-    AbsoluteLength, App, Bounds, DefiniteLength, Edges, GridTemplate, Length, Pixels, Point, Size,
-    Style, Window, size,
+    AbsoluteLength, App, Bounds, DefiniteLength, Edges, GridTemplate, GridTemplateComponent,
+    GridTrack, GridTrackMax, GridTrackMin, Length, Pixels, Point, Size, Style, Window, size,
     util::{
         ceil_to_device_pixel, round_half_toward_zero, round_stroke_to_device_pixel,
         round_to_device_pixel,
@@ -12,7 +12,6 @@ use std::{fmt::Debug, ops::Range};
 use taffy::{
     TaffyTree, TraversePartialTree as _,
     geometry::{Point as TaffyPoint, Rect as TaffyRect, Size as TaffySize},
-    prelude::{max_content, min_content},
     style::AvailableSpace as TaffyAvailableSpace,
     tree::NodeId,
 };
@@ -443,7 +442,7 @@ trait ToTaffy<Output> {
 
 impl ToTaffy<taffy::style::Style> for Style {
     fn to_taffy(&self, rem_size: Pixels, scale_factor: f32) -> taffy::style::Style {
-        use taffy::style_helpers::{fr, length, minmax, repeat};
+        use taffy::style_helpers::{auto, fr, length, max_content, min_content, minmax, repeat};
 
         fn to_grid_line(
             placement: &Range<crate::GridPlacement>,
@@ -454,35 +453,51 @@ impl ToTaffy<taffy::style::Style> for Style {
             }
         }
 
-        fn to_grid_repeat<T: taffy::style::CheapCloneStr>(
-            unit: &Option<GridTemplate>,
+        fn to_min_track(track: &GridTrackMin) -> taffy::style::MinTrackSizingFunction {
+            match track {
+                GridTrackMin::Px(value) => length(value.0),
+                GridTrackMin::Auto => auto(),
+                GridTrackMin::MinContent => min_content(),
+                GridTrackMin::MaxContent => max_content(),
+            }
+        }
+
+        fn to_max_track(track: &GridTrackMax) -> taffy::style::MaxTrackSizingFunction {
+            match track {
+                GridTrackMax::Px(value) => length(value.0),
+                GridTrackMax::Fr(value) => fr(*value),
+                GridTrackMax::Auto => auto(),
+                GridTrackMax::MinContent => min_content(),
+                GridTrackMax::MaxContent => max_content(),
+            }
+        }
+
+        fn to_track(track: &GridTrack) -> taffy::style::TrackSizingFunction {
+            match track {
+                GridTrack::Px(value) => length(value.0),
+                GridTrack::Fr(value) => fr(*value),
+                GridTrack::Auto => auto(),
+                GridTrack::MinContent => min_content(),
+                GridTrack::MaxContent => max_content(),
+                GridTrack::MinMax { min, max } => minmax(to_min_track(min), to_max_track(max)),
+            }
+        }
+
+        fn to_grid_template<T: taffy::style::CheapCloneStr>(
+            template: &Option<GridTemplate>,
         ) -> Vec<taffy::GridTemplateComponent<T>> {
-            unit.map(|template| {
-                match template.min_size {
-                    // grid-template-*: repeat(<number>, minmax(0, 1fr));
-                    crate::GridTemplateMinSize::Zero => {
-                        vec![repeat(
-                            template.repeat,
-                            vec![minmax(length(0.0_f32), fr(1.0_f32))],
-                        )]
+            template
+                .iter()
+                .flat_map(|template| template.tracks.iter())
+                .map(|component| match component {
+                    GridTemplateComponent::Track(track) => {
+                        taffy::GridTemplateComponent::Single(to_track(track))
                     }
-                    // grid-template-*: repeat(<number>, minmax(min-content, 1fr));
-                    crate::GridTemplateMinSize::MinContent => {
-                        vec![repeat(
-                            template.repeat,
-                            vec![minmax(min_content(), fr(1.0_f32))],
-                        )]
+                    GridTemplateComponent::Repeat { count, tracks } => {
+                        repeat(*count, tracks.iter().map(to_track).collect())
                     }
-                    // grid-template-*: repeat(<number>, minmax(0, max-content))
-                    crate::GridTemplateMinSize::MaxContent => {
-                        vec![repeat(
-                            template.repeat,
-                            vec![minmax(length(0.0_f32), max_content())],
-                        )]
-                    }
-                }
-            })
-            .unwrap_or_default()
+                })
+                .collect()
         }
 
         taffy::style::Style {
@@ -508,8 +523,8 @@ impl ToTaffy<taffy::style::Style> for Style {
             flex_basis: self.flex_basis.to_taffy(rem_size, scale_factor),
             flex_grow: self.flex_grow,
             flex_shrink: self.flex_shrink,
-            grid_template_rows: to_grid_repeat(&self.grid_rows),
-            grid_template_columns: to_grid_repeat(&self.grid_cols),
+            grid_template_rows: to_grid_template(&self.grid_rows),
+            grid_template_columns: to_grid_template(&self.grid_cols),
             grid_row: self
                 .grid_location
                 .as_ref()
@@ -776,6 +791,50 @@ mod tests {
         assert_eq!(
             taffy_border.left,
             taffy::style::LengthPercentage::length(2.0)
+        );
+    }
+
+    #[test]
+    fn grid_templates_preserve_mixed_tracks_and_repeat() {
+        use taffy::style_helpers::{fr, length, max_content, minmax, repeat};
+
+        let style = Style {
+            grid_cols: Some(GridTemplate {
+                tracks: vec![
+                    GridTemplateComponent::Track(GridTrack::MaxContent),
+                    GridTemplateComponent::Track(GridTrack::MinMax {
+                        min: GridTrackMin::Px(px(0.)),
+                        max: GridTrackMax::Fr(1.),
+                    }),
+                    GridTemplateComponent::Track(GridTrack::Auto),
+                    GridTemplateComponent::Repeat {
+                        count: 2,
+                        tracks: vec![GridTrack::Px(px(48.)), GridTrack::Fr(2.)],
+                    },
+                ],
+            }),
+            grid_rows: Some(GridTemplate {
+                tracks: vec![GridTemplateComponent::Track(GridTrack::MinContent)],
+            }),
+            ..Default::default()
+        };
+
+        let taffy_style: taffy::style::Style = style.to_taffy(px(16.), 1.);
+
+        assert_eq!(
+            taffy_style.grid_template_columns,
+            vec![
+                taffy::GridTemplateComponent::Single(max_content()),
+                taffy::GridTemplateComponent::Single(minmax(length(0.), fr(1.))),
+                taffy::GridTemplateComponent::Single(taffy::style_helpers::auto()),
+                repeat(2, vec![length(48.), fr(2.)]),
+            ]
+        );
+        assert_eq!(
+            taffy_style.grid_template_rows,
+            vec![taffy::GridTemplateComponent::Single(
+                taffy::style_helpers::min_content(),
+            )]
         );
     }
 }
