@@ -413,6 +413,7 @@ impl Element for EditorText {
             let run = TextRun {
                 len: placeholder.len(),
                 font: style.font(),
+                letter_spacing: style.letter_spacing,
                 color: hsla(0., 0., 0.5, 0.5),
                 background_color: None,
                 underline: None,
@@ -431,6 +432,7 @@ impl Element for EditorText {
                     let run = TextRun {
                         len: text.len(),
                         font: style.font(),
+                        letter_spacing: style.letter_spacing,
                         color: text_color,
                         background_color: None,
                         underline: None,

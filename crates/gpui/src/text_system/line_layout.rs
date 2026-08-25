@@ -671,6 +671,8 @@ impl LineLayoutCache {
                 .platform_text_system
                 .layout_line(&text, font_size, runs);
 
+            apply_letter_spacing_to_layout(&mut layout, runs);
+
             if let Some(force_width) = force_width {
                 apply_force_width_to_layout(&mut layout, force_width);
             }
@@ -820,6 +822,8 @@ impl LineLayoutCache {
             .platform_text_system
             .layout_line(&text, font_size, runs);
 
+        apply_letter_spacing_to_layout(&mut layout, runs);
+
         if let Some(force_width) = force_width {
             apply_force_width_to_layout(&mut layout, force_width);
         }
@@ -871,12 +875,61 @@ fn apply_force_width_to_layout(layout: &mut LineLayout, force_width: Pixels) {
     }
 }
 
+fn apply_letter_spacing_to_layout(layout: &mut LineLayout, runs: &[FontRun]) {
+    if runs.iter().all(|run| run.letter_spacing == px(0.)) {
+        return;
+    }
+
+    let mut glyphs = layout
+        .runs
+        .iter()
+        .enumerate()
+        .flat_map(|(run_index, run)| {
+            run.glyphs
+                .iter()
+                .enumerate()
+                .map(move |(glyph_index, glyph)| {
+                    (run_index, glyph_index, glyph.position.x, glyph.index)
+                })
+        })
+        .collect::<Vec<_>>();
+    glyphs.sort_by(|left, right| {
+        left.2
+            .partial_cmp(&right.2)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let letter_spacing_at = |index: usize| {
+        let mut offset = 0usize;
+        for run in runs {
+            offset += run.len;
+            if index < offset {
+                return run.letter_spacing;
+            }
+        }
+        px(0.)
+    };
+
+    let mut added = px(0.);
+    for (position, &(run_index, glyph_index, shaped_x, text_index)) in glyphs.iter().enumerate() {
+        layout.runs[run_index].glyphs[glyph_index].position.x = shaped_x + added;
+        let next_starts_cluster = glyphs
+            .get(position + 1)
+            .is_some_and(|next| next.2 != shaped_x);
+        if next_starts_cluster {
+            added += letter_spacing_at(text_index);
+        }
+    }
+    layout.width += added;
+}
+
 /// A run of text with a single font.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 #[expect(missing_docs)]
 pub struct FontRun {
     pub len: usize,
     pub font_id: FontId,
+    pub letter_spacing: Pixels,
 }
 
 trait AsCacheKeyRef {

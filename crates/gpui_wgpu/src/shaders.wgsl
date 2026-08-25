@@ -141,8 +141,8 @@ struct Background {
     color_space: u32,
     solid: Hsla,
     gradient_angle_or_pattern_height: f32,
-    colors: array<LinearColorStop, 2>,
-    pad: u32,
+    colors: array<LinearColorStop, 8>,
+    color_count: u32,
 }
 
 struct AtlasTextureId {
@@ -402,7 +402,7 @@ struct GradientColor {
 }
 
 fn prepare_gradient_color(tag: u32, color_space: u32,
-    solid: Hsla, colors: array<LinearColorStop, 2>) -> GradientColor {
+    solid: Hsla, colors: array<LinearColorStop, 8>) -> GradientColor {
     var result = GradientColor();
 
     if (tag == 0u || tag == 2u || tag == 3u) {
@@ -442,9 +442,6 @@ fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
             let angle = background.gradient_angle_or_pattern_height;
             let radians = (angle % 360.0 - 90.0) * M_PI_F / 180.0;
             var direction = vec2<f32>(cos(radians), sin(radians));
-            let stop0_percentage = background.colors[0].percentage;
-            let stop1_percentage = background.colors[1].percentage;
-
             // Expand the short side to be the same as the long side
             if (bounds.size.x > bounds.size.y) {
                 direction.y *= bounds.size.y / bounds.size.x;
@@ -464,16 +461,43 @@ fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
                 t = (t + half_size.y) / bounds.size.y;
             }
 
-            // Adjust t based on the stop percentages
-            t = (t - stop0_percentage) / (stop1_percentage - stop0_percentage);
-            t = clamp(t, 0.0, 1.0);
+            let stop_count = max(background.color_count, 2u);
+            var upper_stop = 1u;
+            for (var i = 1u; i < stop_count; i++) {
+                upper_stop = i;
+                if (t <= background.colors[i].percentage) {
+                    break;
+                }
+            }
+            let lower_stop = upper_stop - 1u;
+            let lower_percentage = background.colors[lower_stop].percentage;
+            let upper_percentage = background.colors[upper_stop].percentage;
+            t = clamp(
+                (t - lower_percentage) / max(upper_percentage - lower_percentage, 0.000001),
+                0.0,
+                1.0,
+            );
+
+            var resolved_color0 = color0;
+            var resolved_color1 = color1;
+            if (stop_count > 2u) {
+                resolved_color0 = hsla_to_rgba(background.colors[lower_stop].color);
+                resolved_color1 = hsla_to_rgba(background.colors[upper_stop].color);
+                if (background.color_space == 0u) {
+                    resolved_color0 = linear_to_srgba(resolved_color0);
+                    resolved_color1 = linear_to_srgba(resolved_color1);
+                } else if (background.color_space == 1u) {
+                    resolved_color0 = linear_srgb_to_oklab(resolved_color0);
+                    resolved_color1 = linear_srgb_to_oklab(resolved_color1);
+                }
+            }
 
             switch (background.color_space) {
                 default: {
-                    background_color = srgba_to_linear(mix(color0, color1, t));
+                    background_color = srgba_to_linear(mix(resolved_color0, resolved_color1, t));
                 }
                 case 1u: {
-                    let oklab_color = mix(color0, color1, t);
+                    let oklab_color = mix(resolved_color0, resolved_color1, t);
                     background_color = oklab_to_linear_srgb(oklab_color);
                 }
             }

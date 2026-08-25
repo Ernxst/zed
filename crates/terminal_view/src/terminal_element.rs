@@ -921,6 +921,7 @@ impl TerminalElement {
                 style,
                 ..text_style.font()
             },
+            letter_spacing: text_style.letter_spacing,
             underline,
             strikethrough,
         };
