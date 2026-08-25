@@ -2478,6 +2478,16 @@ impl Window {
         self.platform_window.resize(size);
     }
 
+    /// Simulates a native content resize for tests without requiring a mapped display.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn simulate_resize(&mut self, size: Size<Pixels>, cx: &mut App) {
+        self.viewport_size = size;
+        self.refresh();
+        self.bounds_observers
+            .clone()
+            .retain(&(), |callback| callback(self, cx));
+    }
+
     /// Returns whether or not the window is currently fullscreen
     pub fn is_fullscreen(&self) -> bool {
         self.platform_window.is_fullscreen()
