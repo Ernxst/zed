@@ -777,6 +777,7 @@ mod tests {
         let mut style = FontRun {
             font_id,
             len: line.len(),
+            letter_spacing: px(0.),
         };
 
         let layout = fonts.layout_line(line, px(16.), &[style]);
@@ -798,10 +799,12 @@ mod tests {
             FontRun {
                 len: "\u{feff}".len(),
                 font_id,
+                letter_spacing: px(0.),
             },
             FontRun {
                 len: "ab".len(),
                 font_id,
+                letter_spacing: px(0.),
             },
         ];
         let layout = fonts.layout_line(line, px(16.), font_runs);
@@ -820,8 +823,16 @@ mod tests {
 
         let text = "hello world";
         let font_runs = &[
-            FontRun { font_id, len: 5 }, // "hello"
-            FontRun { font_id, len: 6 }, // " world"
+            FontRun {
+                font_id,
+                len: 5,
+                letter_spacing: px(0.),
+            }, // "hello"
+            FontRun {
+                font_id,
+                len: 6,
+                letter_spacing: px(0.),
+            }, // " world"
         ];
 
         let layout = fonts.layout_line(text, px(16.), font_runs);
@@ -841,11 +852,16 @@ mod tests {
         // Test with different font runs - should not insert ZWNJ
         let font_id2 = fonts.font_id(&font("Times")).unwrap_or(font_id);
         let font_runs_different = &[
-            FontRun { font_id, len: 5 }, // "hello"
+            FontRun {
+                font_id,
+                len: 5,
+                letter_spacing: px(0.),
+            }, // "hello"
             // " world"
             FontRun {
                 font_id: font_id2,
                 len: 6,
+                letter_spacing: px(0.),
             },
         ];
 
@@ -870,15 +886,31 @@ mod tests {
         let font_id = fonts.font_id(&font("Helvetica")).unwrap();
 
         let text = "hello";
-        let font_runs = &[FontRun { font_id, len: 5 }];
+        let font_runs = &[FontRun {
+            font_id,
+            len: 5,
+            letter_spacing: px(0.),
+        }];
         let layout = fonts.layout_line(text, px(16.), font_runs);
         assert_eq!(layout.len, text.len());
 
         let text = "abc";
         let font_runs = &[
-            FontRun { font_id, len: 1 }, // "a"
-            FontRun { font_id, len: 1 }, // "b"
-            FontRun { font_id, len: 1 }, // "c"
+            FontRun {
+                font_id,
+                len: 1,
+                letter_spacing: px(0.),
+            }, // "a"
+            FontRun {
+                font_id,
+                len: 1,
+                letter_spacing: px(0.),
+            }, // "b"
+            FontRun {
+                font_id,
+                len: 1,
+                letter_spacing: px(0.),
+            }, // "c"
         ];
         let layout = fonts.layout_line(text, px(16.), font_runs);
         assert_eq!(layout.len, text.len());
