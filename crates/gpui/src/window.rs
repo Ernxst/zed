@@ -868,6 +868,10 @@ pub enum HitboxBehavior {
     #[default]
     Normal,
 
+    /// This hitbox is retained for focus, pointer capture, or other element
+    /// state, but never participates in ordinary mouse hit testing.
+    IgnoreMouse,
+
     /// All hitboxes behind this hitbox will be ignored and so will have `hitbox.is_hovered() ==
     /// false` and `hitbox.should_handle_scroll() == false`. Typically for elements this causes
     /// skipping of all mouse events, hover styles, and tooltips. This flag is set by
@@ -1085,6 +1089,9 @@ impl Frame {
         let mut set_hover_hitbox_count = false;
         let mut hit_test = HitTest::default();
         for hitbox in self.hitboxes.iter().rev() {
+            if hitbox.behavior == HitboxBehavior::IgnoreMouse {
+                continue;
+            }
             let bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
             if bounds.contains(&position) {
                 hit_test.ids.push(hitbox.id);
@@ -2842,6 +2849,36 @@ impl Window {
             .chain(self.next_frame.hitboxes.iter())
             .find(|hitbox| hitbox.id == hitbox_id)
             .and_then(|hitbox| hitbox.identity.clone());
+    }
+
+    /// Captures the pointer for the currently painted element whose stable
+    /// identity ends with `element_id`.
+    ///
+    /// This is the imperative counterpart to
+    /// [`InteractiveElement::capture_pointer`]. It is useful when the capture
+    /// decision arrives after mouse-down dispatch, such as from a renderer on
+    /// the other side of a language bridge. Returns `false` when no current
+    /// hitbox has that identity.
+    pub fn capture_pointer_for_element(&mut self, element_id: &ElementId) -> bool {
+        let hitbox = self
+            .rendered_frame
+            .hitboxes
+            .iter()
+            .rev()
+            .find(|hitbox| {
+                hitbox
+                    .identity
+                    .as_ref()
+                    .and_then(|identity| identity.0.last())
+                    == Some(element_id)
+            })
+            .cloned();
+
+        let Some(hitbox) = hitbox else {
+            return false;
+        };
+        self.capture_pointer(hitbox.id);
+        true
     }
 
     /// Releases any active pointer capture.
