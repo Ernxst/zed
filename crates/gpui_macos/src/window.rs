@@ -898,6 +898,7 @@ impl MacWindow {
             tabbing_identifier,
             ..
         }: WindowParams,
+        virtual_display_bounds: Option<Bounds<Pixels>>,
         cursor_visible: Arc<AtomicBool>,
         foreground_executor: ForegroundExecutor,
         background_executor: BackgroundExecutor,
@@ -949,38 +950,53 @@ impl MacWindow {
                 }
             };
 
-            let display = display_id
-                .and_then(MacDisplay::find_by_id)
-                .unwrap_or_else(MacDisplay::primary);
+            let (display_bounds, screen_frame, target_screen) =
+                if let Some(display_bounds) = virtual_display_bounds {
+                    let screen_frame = NSRect::new(
+                        NSPoint::new(
+                            display_bounds.origin.x.as_f32() as f64,
+                            display_bounds.origin.y.as_f32() as f64,
+                        ),
+                        NSSize::new(
+                            display_bounds.size.width.as_f32() as f64,
+                            display_bounds.size.height.as_f32() as f64,
+                        ),
+                    );
+                    (display_bounds, screen_frame, nil)
+                } else {
+                    let display = display_id
+                        .and_then(MacDisplay::find_by_id)
+                        .unwrap_or_else(MacDisplay::primary);
+                    let display_bounds = display.bounds();
+                    let mut target_screen = nil;
+                    let mut screen_frame = None;
 
-            let mut target_screen = nil;
-            let mut screen_frame = None;
+                    let screens = NSScreen::screens(nil);
+                    let count: u64 = cocoa::foundation::NSArray::count(screens);
+                    for i in 0..count {
+                        let screen = cocoa::foundation::NSArray::objectAtIndex(screens, i);
+                        let Some(screen_display_id) = display_id_for_screen(screen) else {
+                            continue;
+                        };
+                        if screen_display_id == display.0 {
+                            screen_frame = Some(NSScreen::frame(screen));
+                            target_screen = screen;
+                        }
+                    }
 
-            let screens = NSScreen::screens(nil);
-            let count: u64 = cocoa::foundation::NSArray::count(screens);
-            for i in 0..count {
-                let screen = cocoa::foundation::NSArray::objectAtIndex(screens, i);
-                let Some(display_id) = display_id_for_screen(screen) else {
-                    continue;
+                    let screen_frame = screen_frame.unwrap_or_else(|| {
+                        let screen = NSScreen::mainScreen(nil);
+                        target_screen = screen;
+                        NSScreen::frame(screen)
+                    });
+                    (display_bounds, screen_frame, target_screen)
                 };
-                let frame = NSScreen::frame(screen);
-                if display_id == display.0 {
-                    screen_frame = Some(frame);
-                    target_screen = screen;
-                }
-            }
-
-            let screen_frame = screen_frame.unwrap_or_else(|| {
-                let screen = NSScreen::mainScreen(nil);
-                target_screen = screen;
-                NSScreen::frame(screen)
-            });
 
             let window_rect = NSRect::new(
                 NSPoint::new(
                     screen_frame.origin.x + bounds.origin.x.as_f32() as f64,
                     screen_frame.origin.y
-                        + (display.bounds().size.height - bounds.origin.y).as_f32() as f64,
+                        + (display_bounds.size.height - bounds.origin.y).as_f32() as f64,
                 ),
                 NSSize::new(
                     bounds.size.width.as_f32() as f64,

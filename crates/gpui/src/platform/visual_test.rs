@@ -7,10 +7,10 @@
 
 use crate::ScreenCaptureSource;
 use crate::{
-    AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, ForegroundExecutor, Keymap,
-    Menu, MenuItem, OwnedMenu, PathPromptOptions, Platform, PlatformDisplay,
-    PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, Task,
-    TestDispatcher, WindowAppearance, WindowParams,
+    AnyWindowHandle, BackgroundExecutor, Bounds, ClipboardItem, CursorStyle, DisplayId,
+    ForegroundExecutor, Keymap, Menu, MenuItem, OwnedMenu, PathPromptOptions, Pixels, Platform,
+    PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
+    PlatformWindow, Task, TestDispatcher, WindowAppearance, WindowParams, point, px,
 };
 use anyhow::Result;
 use futures::channel::oneshot;
@@ -33,8 +33,36 @@ pub struct VisualTestPlatform {
     background_executor: BackgroundExecutor,
     foreground_executor: ForegroundExecutor,
     platform: Rc<dyn Platform>,
+    display: Rc<dyn PlatformDisplay>,
     clipboard: Mutex<Option<ClipboardItem>>,
     find_pasteboard: Mutex<Option<ClipboardItem>>,
+}
+
+#[derive(Debug)]
+struct VisualTestDisplay {
+    bounds: Bounds<Pixels>,
+}
+
+impl VisualTestDisplay {
+    fn new() -> Self {
+        Self {
+            bounds: Bounds::from_corners(point(px(0.), px(0.)), point(px(1920.), px(1080.))),
+        }
+    }
+}
+
+impl PlatformDisplay for VisualTestDisplay {
+    fn id(&self) -> DisplayId {
+        DisplayId::new(1)
+    }
+
+    fn uuid(&self) -> Result<uuid::Uuid> {
+        Ok(uuid::Uuid::nil())
+    }
+
+    fn bounds(&self) -> Bounds<Pixels> {
+        self.bounds
+    }
 }
 
 impl VisualTestPlatform {
@@ -53,6 +81,7 @@ impl VisualTestPlatform {
             background_executor,
             foreground_executor,
             platform,
+            display: Rc::new(VisualTestDisplay::new()),
             clipboard: Mutex::new(None),
             find_pasteboard: Mutex::new(None),
         }
@@ -94,11 +123,11 @@ impl Platform for VisualTestPlatform {
     fn unhide_other_apps(&self) {}
 
     fn displays(&self) -> Vec<Rc<dyn PlatformDisplay>> {
-        self.platform.displays()
+        vec![self.display.clone()]
     }
 
     fn primary_display(&self) -> Option<Rc<dyn PlatformDisplay>> {
-        self.platform.primary_display()
+        Some(self.display.clone())
     }
 
     fn active_window(&self) -> Option<AnyWindowHandle> {
@@ -124,7 +153,8 @@ impl Platform for VisualTestPlatform {
         handle: AnyWindowHandle,
         options: WindowParams,
     ) -> Result<Box<dyn PlatformWindow>> {
-        self.platform.open_window(handle, options)
+        self.platform
+            .open_window_for_visual_test(handle, options, self.display.clone())
     }
 
     fn window_appearance(&self) -> WindowAppearance {

@@ -207,6 +207,7 @@ pub(crate) struct MacPlatformState {
     menu_actions: Vec<Box<dyn Action>>,
     open_urls: Option<Box<dyn FnMut(Vec<String>)>>,
     finish_launching: Option<Box<dyn FnOnce()>>,
+    finish_launching_panic: Option<Box<dyn std::any::Any + Send>>,
     dock_menu: Option<id>,
     menus: Option<Vec<OwnedMenu>>,
     keyboard_mapper: Rc<MacKeyboardMapper>,
@@ -252,6 +253,7 @@ impl MacPlatform {
             menu_actions: Default::default(),
             open_urls: None,
             finish_launching: None,
+            finish_launching_panic: None,
             dock_menu: None,
             on_keyboard_layout_change: None,
             on_thermal_state_change: None,
@@ -748,10 +750,16 @@ impl Platform for MacPlatform {
             app.run();
             pool.drain();
 
+            let finish_launching_panic = self.0.lock().finish_launching_panic.take();
+
             if embedded {
                 self.finish_embedded_run();
             } else {
                 self.clear_appkit_registration();
+            }
+
+            if let Some(payload) = finish_launching_panic {
+                std::panic::resume_unwind(payload);
             }
         }
     }
@@ -909,6 +917,35 @@ impl Platform for MacPlatform {
         Ok(Box::new(MacWindow::open(
             handle,
             options,
+            None,
+            cursor_visible,
+            foreground_executor,
+            background_executor,
+            renderer_context,
+        )))
+    }
+
+    #[cfg(feature = "test-support")]
+    fn open_window_for_visual_test(
+        &self,
+        handle: AnyWindowHandle,
+        options: WindowParams,
+        display: Rc<dyn PlatformDisplay>,
+    ) -> Result<Box<dyn PlatformWindow>> {
+        let (cursor_visible, foreground_executor, background_executor, renderer_context) = {
+            let guard = self.0.lock();
+            (
+                guard.cursor_visible.clone(),
+                guard.foreground_executor.clone(),
+                guard.background_executor.clone(),
+                guard.renderer_context.clone(),
+            )
+        };
+
+        Ok(Box::new(MacWindow::open(
+            handle,
+            options,
+            Some(display.bounds()),
             cursor_visible,
             foreground_executor,
             background_executor,
@@ -1567,10 +1604,14 @@ extern "C" fn did_finish_launching(this: &mut Object, _: Sel, _: id) {
                 matches!(state.mode, MacPlatformMode::Embedded(_)),
             )
         };
+        let mut callback_panicked = false;
         if let Some(callback) = callback {
-            callback();
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)) {
+                platform.0.lock().finish_launching_panic = Some(payload);
+                callback_panicked = true;
+            }
         }
-        if embedded {
+        if embedded || callback_panicked {
             stop_app_immediately();
         }
     }

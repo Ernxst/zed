@@ -165,6 +165,21 @@ pub trait Platform: 'static {
         options: WindowParams,
     ) -> anyhow::Result<Box<dyn PlatformWindow>>;
 
+    /// Opens a real renderer-backed window using geometry from a virtual display.
+    ///
+    /// Visual tests use this to keep layout deterministic and avoid consulting the
+    /// host display server. Platforms that do not need special handling can delegate
+    /// to their ordinary window path.
+    #[cfg(any(test, feature = "test-support"))]
+    fn open_window_for_visual_test(
+        &self,
+        handle: AnyWindowHandle,
+        options: WindowParams,
+        _display: Rc<dyn PlatformDisplay>,
+    ) -> anyhow::Result<Box<dyn PlatformWindow>> {
+        self.open_window(handle, options)
+    }
+
     /// Returns the appearance of the application's windows.
     fn window_appearance(&self) -> WindowAppearance;
 

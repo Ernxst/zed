@@ -18,6 +18,14 @@ pub(crate) struct MacDisplay(pub(crate) CGDirectDisplayID);
 unsafe impl Send for MacDisplay {}
 
 impl MacDisplay {
+    #[cfg(feature = "test-support")]
+    fn assert_discovery_available() {
+        assert!(
+            std::env::var_os("GPUI_TEST_DISABLE_DISPLAY_DISCOVERY").is_none(),
+            "display discovery disabled by GPUI_TEST_DISABLE_DISPLAY_DISCOVERY"
+        );
+    }
+
     /// Get the screen with the given [`DisplayId`].
     pub fn find_by_id(id: DisplayId) -> Option<Self> {
         Self::all().find(|screen| screen.id() == id)
@@ -26,6 +34,9 @@ impl MacDisplay {
     /// Get the primary screen - the one with the menu bar, and whose bottom left
     /// corner is at the origin of the AppKit coordinate system.
     pub fn primary() -> Self {
+        #[cfg(feature = "test-support")]
+        Self::assert_discovery_available();
+
         // Instead of iterating through all active systems displays via `all()` we use the first
         // NSScreen and gets its CGDirectDisplayID, because we can't be sure that `CGGetActiveDisplayList`
         // will always return a list of active displays (machine might be sleeping).
@@ -46,6 +57,9 @@ impl MacDisplay {
 
     /// Obtains an iterator over all currently active system displays.
     pub fn all() -> impl Iterator<Item = Self> {
+        #[cfg(feature = "test-support")]
+        Self::assert_discovery_available();
+
         unsafe {
             // We're assuming there aren't more than 32 displays connected to the system.
             let mut displays = Vec::with_capacity(32);
