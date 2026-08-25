@@ -81,6 +81,41 @@ static mut PANEL_CLASS: *const Class = ptr::null();
 static mut VIEW_CLASS: *const Class = ptr::null();
 static mut BLURRED_VIEW_CLASS: *const Class = ptr::null();
 
+#[cfg(feature = "display-discovery-fault-injection")]
+static AUTORELEASE_POOL_DRAIN_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(feature = "display-discovery-fault-injection")]
+static NATIVE_WINDOW_ALLOCATION_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+struct AutoreleasePoolGuard(id);
+
+impl AutoreleasePoolGuard {
+    unsafe fn new() -> Self {
+        Self(unsafe { NSAutoreleasePool::new(nil) })
+    }
+}
+
+impl Drop for AutoreleasePoolGuard {
+    fn drop(&mut self) {
+        unsafe {
+            self.0.drain();
+        }
+        #[cfg(feature = "display-discovery-fault-injection")]
+        AUTORELEASE_POOL_DRAIN_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(feature = "display-discovery-fault-injection")]
+pub(crate) fn test_autorelease_pool_drain_count() -> usize {
+    AUTORELEASE_POOL_DRAIN_COUNT.load(Ordering::Relaxed)
+}
+
+#[cfg(feature = "display-discovery-fault-injection")]
+pub(crate) fn test_native_window_allocation_count() -> usize {
+    NATIVE_WINDOW_ALLOCATION_COUNT.load(Ordering::Relaxed)
+}
+
 #[allow(non_upper_case_globals)]
 const NSWindowStyleMaskNonactivatingPanel: NSWindowStyleMask =
     NSWindowStyleMask::from_bits_retain(1 << 7);
@@ -905,50 +940,7 @@ impl MacWindow {
         renderer_context: renderer::Context,
     ) -> Self {
         unsafe {
-            let pool = NSAutoreleasePool::new(nil);
-
-            let allows_automatic_window_tabbing = tabbing_identifier.is_some();
-            if allows_automatic_window_tabbing {
-                let () = msg_send![class!(NSWindow), setAllowsAutomaticWindowTabbing: YES];
-            } else {
-                let () = msg_send![class!(NSWindow), setAllowsAutomaticWindowTabbing: NO];
-            }
-
-            let mut style_mask;
-            if let Some(titlebar) = titlebar.as_ref() {
-                style_mask =
-                    NSWindowStyleMask::NSClosableWindowMask | NSWindowStyleMask::NSTitledWindowMask;
-
-                if is_resizable {
-                    style_mask |= NSWindowStyleMask::NSResizableWindowMask;
-                }
-
-                if is_minimizable {
-                    style_mask |= NSWindowStyleMask::NSMiniaturizableWindowMask;
-                }
-
-                if titlebar.appears_transparent {
-                    style_mask |= NSWindowStyleMask::NSFullSizeContentViewWindowMask;
-                }
-            } else {
-                style_mask = NSWindowStyleMask::NSTitledWindowMask
-                    | NSWindowStyleMask::NSFullSizeContentViewWindowMask;
-            }
-
-            let native_window: id = match kind {
-                WindowKind::Normal => {
-                    msg_send![WINDOW_CLASS, alloc]
-                }
-                // `AnchoredPopup` is rejected in `MacPlatform::open_window`, grouped here only
-                // for exhaustiveness.
-                WindowKind::PopUp | WindowKind::AnchoredPopup(_) => {
-                    style_mask |= NSWindowStyleMaskNonactivatingPanel;
-                    msg_send![PANEL_CLASS, alloc]
-                }
-                WindowKind::Floating | WindowKind::Dialog => {
-                    msg_send![PANEL_CLASS, alloc]
-                }
-            };
+            let _pool = AutoreleasePoolGuard::new();
 
             let (display_bounds, screen_frame, target_screen) =
                 if let Some(display_bounds) = virtual_display_bounds {
@@ -992,6 +984,38 @@ impl MacWindow {
                     (display_bounds, screen_frame, target_screen)
                 };
 
+            let allows_automatic_window_tabbing = tabbing_identifier.is_some();
+            if allows_automatic_window_tabbing {
+                let () = msg_send![class!(NSWindow), setAllowsAutomaticWindowTabbing: YES];
+            } else {
+                let () = msg_send![class!(NSWindow), setAllowsAutomaticWindowTabbing: NO];
+            }
+
+            let mut style_mask;
+            if let Some(titlebar) = titlebar.as_ref() {
+                style_mask =
+                    NSWindowStyleMask::NSClosableWindowMask | NSWindowStyleMask::NSTitledWindowMask;
+
+                if is_resizable {
+                    style_mask |= NSWindowStyleMask::NSResizableWindowMask;
+                }
+
+                if is_minimizable {
+                    style_mask |= NSWindowStyleMask::NSMiniaturizableWindowMask;
+                }
+
+                if titlebar.appears_transparent {
+                    style_mask |= NSWindowStyleMask::NSFullSizeContentViewWindowMask;
+                }
+            } else {
+                style_mask = NSWindowStyleMask::NSTitledWindowMask
+                    | NSWindowStyleMask::NSFullSizeContentViewWindowMask;
+            }
+
+            if matches!(&kind, WindowKind::PopUp | WindowKind::AnchoredPopup(_)) {
+                style_mask |= NSWindowStyleMaskNonactivatingPanel;
+            }
+
             let window_rect = NSRect::new(
                 NSPoint::new(
                     screen_frame.origin.x + bounds.origin.x.as_f32() as f64,
@@ -1003,6 +1027,18 @@ impl MacWindow {
                     bounds.size.height.as_f32() as f64,
                 ),
             );
+
+            let native_window: id = match kind {
+                WindowKind::Normal => msg_send![WINDOW_CLASS, alloc],
+                // `AnchoredPopup` is rejected in `MacPlatform::open_window`, grouped here only
+                // for exhaustiveness.
+                WindowKind::PopUp
+                | WindowKind::AnchoredPopup(_)
+                | WindowKind::Floating
+                | WindowKind::Dialog => msg_send![PANEL_CLASS, alloc],
+            };
+            #[cfg(feature = "display-discovery-fault-injection")]
+            NATIVE_WINDOW_ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
 
             let native_window = native_window.initWithContentRect_styleMask_backing_defer_screen_(
                 window_rect,
@@ -1242,8 +1278,6 @@ impl MacWindow {
                 window_state.move_traffic_light();
                 window_state.sheet_parent = sheet_parent;
             }
-
-            pool.drain();
 
             window
         }

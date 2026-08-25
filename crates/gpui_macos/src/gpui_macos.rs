@@ -57,6 +57,18 @@ pub(crate) use text_system::*;
 
 pub use platform::MacPlatform;
 
+#[cfg(feature = "display-discovery-fault-injection")]
+#[doc(hidden)]
+pub fn test_autorelease_pool_drain_count() -> usize {
+    window::test_autorelease_pool_drain_count()
+}
+
+#[cfg(feature = "display-discovery-fault-injection")]
+#[doc(hidden)]
+pub fn test_native_window_allocation_count() -> usize {
+    window::test_native_window_allocation_count()
+}
+
 trait BoolExt {
     fn to_objc(self) -> BOOL;
 }
