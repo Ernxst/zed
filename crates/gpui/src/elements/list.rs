@@ -1547,7 +1547,7 @@ impl Element for List {
         {
             let new_items = SumTree::from_iter(
                 state.items.iter().map(|item| ListItem::Unmeasured {
-                    size_hint: None,
+                    size_hint: item.size_hint(),
                     focus_handle: item.focus_handle(),
                 }),
                 (),
@@ -2061,6 +2061,31 @@ mod test {
         assert_eq!(state.logical_scroll_top().item_ix, state.item_count());
         assert_eq!(state.item_is_above_viewport(0), Some(true));
         assert_eq!(state.item_is_below_viewport(0), Some(false));
+    }
+
+    #[gpui::test]
+    fn test_uniform_item_height_survives_initial_layout(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let state = ListState::new(100, crate::ListAlignment::Top, px(0.))
+            .with_uniform_item_height(px(48.));
+
+        struct TestView(ListState);
+        impl Render for TestView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                list(self.0.clone(), |_, _, _| {
+                    div().h(px(48.)).w_full().into_any()
+                })
+                .w_full()
+                .h_full()
+            }
+        }
+
+        let view = cx.update(|_, cx| cx.new(|_| TestView(state.clone())));
+        cx.draw(point(px(0.), px(0.)), size(px(400.), px(160.)), |_, _| {
+            view.into_any_element()
+        });
+
+        assert_eq!(state.max_offset_for_scrollbar().y, px(4640.));
     }
 
     #[gpui::test]
