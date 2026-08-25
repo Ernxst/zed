@@ -451,6 +451,9 @@ pub struct TextStyle {
     /// The font size to use, in pixels or rems.
     pub font_size: AbsoluteLength,
 
+    /// Additional space inserted between shaped glyph clusters.
+    pub letter_spacing: Pixels,
+
     /// The line height to use, in pixels or fractions
     pub line_height: DefiniteLength,
 
@@ -491,6 +494,7 @@ impl Default for TextStyle {
             font_features: FontFeatures::default(),
             font_fallbacks: None,
             font_size: rems(1.).into(),
+            letter_spacing: px(0.),
             line_height: phi(),
             font_weight: FontWeight::default(),
             font_style: FontStyle::default(),
@@ -566,6 +570,7 @@ impl TextStyle {
                 weight: self.font_weight,
                 style: self.font_style,
             },
+            letter_spacing: self.letter_spacing,
             color: self.color,
             background_color: self.background_color,
             underline: self.underline,

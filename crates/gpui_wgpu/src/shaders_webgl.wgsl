@@ -102,7 +102,13 @@ fn read_background(cursor: ptr<function, InstanceCursor>) -> Background {
         read_word(cursor),
         read_hsla(cursor),
         read_f32(cursor),
-        array<LinearColorStop, 2>(
+        array<LinearColorStop, 8>(
+            read_color_stop(cursor),
+            read_color_stop(cursor),
+            read_color_stop(cursor),
+            read_color_stop(cursor),
+            read_color_stop(cursor),
+            read_color_stop(cursor),
             read_color_stop(cursor),
             read_color_stop(cursor),
         ),

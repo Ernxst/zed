@@ -215,6 +215,7 @@ impl TextSystem {
                 &[FontRun {
                     len: buffer.len(),
                     font_id,
+                    letter_spacing: px(0.),
                 }],
             )
             .width
@@ -556,6 +557,7 @@ impl WindowTextSystem {
                 let font_id = self.resolve_font(&run.font);
                 if let Some(font_run) = font_runs.last_mut()
                     && font_id == font_run.font_id
+                    && run.letter_spacing == font_run.letter_spacing
                     && !decoration_changed
                 {
                     font_run.len += run_len_within_line;
@@ -563,6 +565,7 @@ impl WindowTextSystem {
                     font_runs.push(FontRun {
                         len: run_len_within_line,
                         font_id,
+                        letter_spacing: run.letter_spacing,
                     });
                 }
 
@@ -670,6 +673,7 @@ impl WindowTextSystem {
             let font_id = self.resolve_font(&run.font);
             if let Some(font_run) = font_runs.last_mut()
                 && font_id == font_run.font_id
+                && run.letter_spacing == font_run.letter_spacing
                 && !decoration_changed
             {
                 font_run.len += run.len;
@@ -677,6 +681,7 @@ impl WindowTextSystem {
                 font_runs.push(FontRun {
                     len: run.len,
                     font_id,
+                    letter_spacing: run.letter_spacing,
                 });
             }
         }
@@ -704,6 +709,7 @@ impl WindowTextSystem {
                 &[FontRun {
                     len: buffer.len(),
                     font_id,
+                    letter_spacing: px(0.),
                 }],
                 None,
             )
@@ -752,6 +758,7 @@ impl WindowTextSystem {
             let font_id = self.resolve_font(&run.font);
             if let Some(font_run) = font_runs.last_mut()
                 && font_id == font_run.font_id
+                && run.letter_spacing == font_run.letter_spacing
                 && !decoration_changed
             {
                 font_run.len += run.len;
@@ -759,6 +766,7 @@ impl WindowTextSystem {
                 font_runs.push(FontRun {
                     len: run.len,
                     font_id,
+                    letter_spacing: run.letter_spacing,
                 });
             }
         }
@@ -814,6 +822,7 @@ impl WindowTextSystem {
             let font_id = self.resolve_font(&run.font);
             if let Some(font_run) = font_runs.last_mut()
                 && font_id == font_run.font_id
+                && run.letter_spacing == font_run.letter_spacing
                 && !decoration_changed
             {
                 font_run.len += run.len;
@@ -821,6 +830,7 @@ impl WindowTextSystem {
                 font_runs.push(FontRun {
                     len: run.len,
                     font_id,
+                    letter_spacing: run.letter_spacing,
                 });
             }
         }
@@ -989,6 +999,8 @@ pub struct TextRun {
     pub len: usize,
     /// The font to use for this run.
     pub font: Font,
+    /// Additional spacing between shaped glyph clusters.
+    pub letter_spacing: Pixels,
     /// The color
     pub color: Hsla,
     /// The background color (if any)

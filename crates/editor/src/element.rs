@@ -7192,6 +7192,7 @@ impl LineWithInvisibles {
                         let run = TextRun {
                             len: x.len(),
                             font: text_style.font(),
+                            letter_spacing: text_style.letter_spacing,
                             color: text_style.color,
                             background_color: text_style.background_color,
                             underline: text_style.underline,
@@ -7269,6 +7270,7 @@ impl LineWithInvisibles {
                         styles.push(TextRun {
                             len: line_chunk.len(),
                             font: text_style.font(),
+                            letter_spacing: text_style.letter_spacing,
                             color: text_style.color,
                             background_color: text_style.background_color,
                             underline: text_style.underline,
@@ -7352,6 +7354,7 @@ impl LineWithInvisibles {
                     output_runs.push(TextRun {
                         len: span_len,
                         font: text_run.font.clone(),
+                        letter_spacing: text_run.letter_spacing,
                         color: text_run.color,
                         background_color: text_run.background_color,
                         underline: text_run.underline,
@@ -7366,6 +7369,7 @@ impl LineWithInvisibles {
                     output_runs.push(TextRun {
                         len: segment_slice_end_col - cursor_col,
                         font: text_run.font.clone(),
+                        letter_spacing: text_run.letter_spacing,
                         color: new_text_color,
                         background_color: text_run.background_color,
                         underline: text_run.underline,
@@ -7382,6 +7386,7 @@ impl LineWithInvisibles {
                 output_runs.push(TextRun {
                     len: run_end_col - cursor_col,
                     font: text_run.font.clone(),
+                    letter_spacing: text_run.letter_spacing,
                     color: text_run.color,
                     background_color: text_run.background_color,
                     underline: text_run.underline,

@@ -1212,11 +1212,31 @@ float4 fill_color(Background background,
           t = (t + half_size.y) / bounds.size.height;
       }
 
-      // Adjust t based on the stop percentages
-      t = (t - background.colors[0].percentage)
-        / (background.colors[1].percentage
-        - background.colors[0].percentage);
-      t = clamp(t, 0.0, 1.0);
+      uint stop_count = max(background.color_count, 2u);
+      uint upper_stop = 1u;
+      for (uint i = 1u; i < stop_count; i++) {
+        upper_stop = i;
+        if (t <= background.colors[i].percentage) {
+          break;
+        }
+      }
+      uint lower_stop = upper_stop - 1u;
+      float lower_percentage = background.colors[lower_stop].percentage;
+      float upper_percentage = background.colors[upper_stop].percentage;
+      t = clamp(
+        (t - lower_percentage) / max(upper_percentage - lower_percentage, 0.000001),
+        0.0,
+        1.0
+      );
+
+      if (stop_count > 2u) {
+        color0 = hsla_to_rgba(background.colors[lower_stop].color);
+        color1 = hsla_to_rgba(background.colors[upper_stop].color);
+        if (background.color_space == 1u) {
+          color0 = srgb_to_oklab(color0);
+          color1 = srgb_to_oklab(color1);
+        }
+      }
 
       switch (background.color_space) {
         case 0:
