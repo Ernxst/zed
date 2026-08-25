@@ -80,6 +80,24 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Sets the color of the paint-only outline around this element.
+    fn outline_color(mut self, color: impl Into<Hsla>) -> Self {
+        self.style().outline_color = Some(color.into());
+        self
+    }
+
+    /// Sets the width of the paint-only outline around this element.
+    fn outline_width(mut self, width: impl Into<AbsoluteLength>) -> Self {
+        self.style().outline_width = Some(width.into());
+        self
+    }
+
+    /// Sets the distance between this element's border edge and its outline.
+    fn outline_offset(mut self, offset: impl Into<AbsoluteLength>) -> Self {
+        self.style().outline_offset = Some(offset.into());
+        self
+    }
+
     /// Sets the whitespace of the element to `normal`.
     /// [Docs](https://tailwindcss.com/docs/whitespace#normal)
     fn whitespace_normal(mut self) -> Self {

@@ -326,6 +326,15 @@ pub struct Style {
     /// Box shadow of the element
     pub box_shadow: Vec<BoxShadow>,
 
+    /// The color of the paint-only outline around this element.
+    pub outline_color: Option<Hsla>,
+
+    /// The width of the paint-only outline around this element.
+    pub outline_width: AbsoluteLength,
+
+    /// The distance between this element's border edge and its outline.
+    pub outline_offset: AbsoluteLength,
+
     /// The text style of this element
     #[refineable]
     pub text: TextStyleRefinement,
@@ -795,6 +804,27 @@ impl Style {
             ));
         }
 
+        if self.is_outline_visible() {
+            let outline_width = self.outline_width.to_pixels(rem_size);
+            let outline_offset = self.outline_offset.to_pixels(rem_size);
+            let outline_extent = outline_width + outline_offset;
+            let outline_bounds = bounds.dilate(outline_extent);
+            let outline_radii = corner_radii
+                .map(|radius| (*radius + outline_extent).max(Pixels::ZERO))
+                .clamp_radii_for_quad_size(outline_bounds.size);
+            let outline_color = self.outline_color.unwrap_or_default();
+            let mut background = outline_color;
+            background.a = 0.;
+            window.paint_quad(quad(
+                outline_bounds,
+                outline_radii,
+                background,
+                Edges::all(outline_width),
+                outline_color,
+                BorderStyle::default(),
+            ));
+        }
+
         #[cfg(debug_assertions)]
         if self.debug_below {
             cx.remove_global::<DebugBelow>();
@@ -805,6 +835,12 @@ impl Style {
         self.border_color
             .is_some_and(|color| !color.is_transparent())
             && self.border_widths.any(|length| !length.is_zero())
+    }
+
+    fn is_outline_visible(&self) -> bool {
+        self.outline_color
+            .is_some_and(|color| !color.is_transparent())
+            && !self.outline_width.is_zero()
     }
 }
 
@@ -846,6 +882,9 @@ impl Default for Style {
             border_style: BorderStyle::default(),
             corner_radii: Corners::default(),
             box_shadow: Default::default(),
+            outline_color: None,
+            outline_width: AbsoluteLength::default(),
+            outline_offset: AbsoluteLength::default(),
             text: TextStyleRefinement::default(),
             mouse_cursor: None,
             opacity: None,
