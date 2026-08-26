@@ -30,7 +30,6 @@ use collections::HashMap;
 use gpui_util::ResultExt;
 use refineable::Refineable;
 use smallvec::SmallVec;
-use stacksafe::{StackSafe, stacksafe};
 use std::{
     any::{Any, TypeId},
     cell::RefCell,
@@ -44,6 +43,11 @@ use std::{
 };
 
 use super::ImageCacheProvider;
+
+#[cfg(feature = "stacker")]
+type StackSafe<T> = stacksafe::StackSafe<T>;
+#[cfg(not(feature = "stacker"))]
+type StackSafe<T> = T;
 
 const DRAG_THRESHOLD: f64 = 2.;
 const DEFAULT_TOOLTIP_SHOW_DELAY: Duration = Duration::from_millis(500);
@@ -1795,8 +1799,11 @@ impl InteractiveElement for Div {
 
 impl ParentElement for Div {
     fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
+        #[cfg(feature = "stacker")]
         self.children
-            .extend(elements.into_iter().map(StackSafe::new))
+            .extend(elements.into_iter().map(StackSafe::new));
+        #[cfg(not(feature = "stacker"))]
+        self.children.extend(elements);
     }
 }
 
@@ -1834,7 +1841,7 @@ impl Element for Div {
         }
     }
 
-    #[stacksafe]
+    #[cfg_attr(feature = "stacker", stacksafe::stacksafe)]
     fn request_layout(
         &mut self,
         global_id: Option<&GlobalElementId>,
@@ -1870,7 +1877,7 @@ impl Element for Div {
         (layout_id, DivFrameState { child_layout_ids })
     }
 
-    #[stacksafe]
+    #[cfg_attr(feature = "stacker", stacksafe::stacksafe)]
     fn prepaint(
         &mut self,
         global_id: Option<&GlobalElementId>,
@@ -1965,7 +1972,7 @@ impl Element for Div {
         )
     }
 
-    #[stacksafe]
+    #[cfg_attr(feature = "stacker", stacksafe::stacksafe)]
     fn paint(
         &mut self,
         global_id: Option<&GlobalElementId>,
@@ -2784,14 +2791,30 @@ impl Interactivity {
                     .and_then(|element| element.hover_state.as_ref())
                     .cloned();
                 let current_view = window.current_view();
+                let move_group_hitbox = group_hitbox.clone();
+                let move_hover_state = hover_state.clone();
 
                 window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
-                    let group_hovered = group_hitbox_is_hovered(&group_hitbox, window);
-                    let was_group_hovered = hover_state
+                    let group_hovered = group_hitbox_is_hovered(&move_group_hitbox, window);
+                    let was_group_hovered = move_hover_state
                         .as_ref()
                         .is_some_and(|state| state.borrow().group);
                     if phase == DispatchPhase::Capture && group_hovered != was_group_hovered {
-                        if let Some(hover_state) = &hover_state {
+                        if let Some(hover_state) = &move_hover_state {
+                            hover_state.borrow_mut().group = group_hovered;
+                            cx.notify(current_view);
+                        }
+                    }
+                });
+
+                let release_hover_state = hover_state;
+                window.on_mouse_event(move |_: &MouseUpEvent, phase, window, cx| {
+                    let group_hovered = group_hitbox_is_spatially_hovered(&group_hitbox, window);
+                    let was_group_hovered = release_hover_state
+                        .as_ref()
+                        .is_some_and(|state| state.borrow().group);
+                    if phase == DispatchPhase::Capture && group_hovered != was_group_hovered {
+                        if let Some(hover_state) = &release_hover_state {
                             hover_state.borrow_mut().group = group_hovered;
                             cx.notify(current_view);
                         }
@@ -3214,8 +3237,15 @@ impl Interactivity {
         if let Some(group_hitbox) = group_hitbox {
             let was_hovered = group_hitbox_is_hovered(&group_hitbox, window);
             let current_view = window.current_view();
+            let move_group_hitbox = group_hitbox.clone();
             window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
-                let hovered = group_hitbox_is_hovered(&group_hitbox, window);
+                let hovered = group_hitbox_is_hovered(&move_group_hitbox, window);
+                if phase == DispatchPhase::Capture && hovered != was_hovered {
+                    cx.notify(current_view);
+                }
+            });
+            window.on_mouse_event(move |_: &MouseUpEvent, phase, window, cx| {
+                let hovered = group_hitbox_is_spatially_hovered(&group_hitbox, window);
                 if phase == DispatchPhase::Capture && hovered != was_hovered {
                     cx.notify(current_view);
                 }
@@ -3882,14 +3912,17 @@ pub(crate) struct GroupHitbox {
 pub(crate) struct GroupHitboxes(HashMap<SharedString, SmallVec<[GroupHitbox; 1]>>);
 
 fn group_hitbox_is_hovered(group_hitbox: &GroupHitbox, window: &Window) -> bool {
-    let pointer_is_inside =
-        !window.last_input_was_keyboard() && group_hitbox.id.should_handle_scroll(window);
+    let pointer_is_inside = group_hitbox_is_spatially_hovered(group_hitbox, window);
     let member_has_capture = group_hitbox
         .identity
         .as_ref()
         .is_some_and(|identity| window.captured_element_is_descendant_of(identity));
 
     pointer_is_inside || member_has_capture
+}
+
+fn group_hitbox_is_spatially_hovered(group_hitbox: &GroupHitbox, window: &Window) -> bool {
+    !window.last_input_was_keyboard() && group_hitbox.id.should_handle_scroll(window)
 }
 
 impl Global for GroupHitboxes {}

@@ -1,15 +1,18 @@
 use crate::display::WebDisplay;
-use crate::events::{ClickState, EventListenerHandle, WebEventListeners, is_mac_platform};
+use crate::events::{
+    ClickState, EventListenerHandle, TouchDrag, WebEventListeners, is_mac_platform,
+};
+use crate::ime_mirror::ImeMirror;
 use crate::platform::WebWindowLifecycle;
 use std::sync::Arc;
 use std::{cell::Cell, cell::RefCell, rc::Rc};
 
 use gpui::{
-    AnyWindowHandle, Bounds, Capslock, Decorations, DevicePixels, DispatchEventResult, GpuSpecs,
-    Modifiers, MouseButton, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
+    AnyWindowHandle, Bounds, Capslock, Decorations, DevicePixels, DispatchEventResult, Edges,
+    GpuSpecs, Modifiers, MouseButton, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
     PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
     ResizeEdge, Scene, Size, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
-    WindowControlArea, WindowControls, WindowDecorations, WindowParams, px,
+    WindowControlArea, WindowControls, WindowDecorations, WindowInsets, WindowParams, px,
 };
 use gpui_wgpu::{WgpuContext, WgpuRenderer, WgpuSurfaceConfig, wgpu};
 use wasm_bindgen::prelude::*;
@@ -46,7 +49,7 @@ pub(crate) struct WebWindowMutableState {
 pub(crate) struct WebWindowInner {
     pub(crate) browser_window: web_sys::Window,
     pub(crate) canvas: web_sys::HtmlCanvasElement,
-    pub(crate) input_element: web_sys::HtmlInputElement,
+    pub(crate) ime_mirror: ImeMirror,
     pub(crate) has_device_pixel_support: bool,
     pub(crate) is_mac: bool,
     pub(crate) state: RefCell<WebWindowMutableState>,
@@ -56,6 +59,15 @@ pub(crate) struct WebWindowInner {
     pub(crate) last_physical_size: Cell<(u32, u32)>,
     pub(crate) notify_scale: Cell<bool>,
     pub(crate) is_composing: Cell<bool>,
+    /// Set while the hidden input changes focus only to show or hide the IME.
+    pub(crate) suppress_focus_status_events: Cell<bool>,
+    pub(crate) text_input_requested: Cell<bool>,
+    pub(crate) touch_drag: Cell<TouchDrag>,
+    pub(crate) active_touch_id: Cell<Option<i32>>,
+    pub(crate) touch_start: Cell<Point<Pixels>>,
+    pub(crate) touch_last: Cell<Point<Pixels>>,
+    pub(crate) long_press_timer: Cell<Option<i32>>,
+    pub(crate) long_press_callback: RefCell<Option<Closure<dyn FnMut()>>>,
     mql_handle: RefCell<Option<MqlHandle>>,
     pending_physical_size: Cell<Option<(u32, u32)>>,
     raf_id: Cell<Option<i32>>,
@@ -108,60 +120,6 @@ impl WebWindow {
         Ok(canvas)
     }
 
-    fn create_hidden_text_input(
-        document: &web_sys::Document,
-        body: &web_sys::HtmlElement,
-    ) -> anyhow::Result<web_sys::HtmlInputElement> {
-        let input_element: web_sys::HtmlInputElement = document
-            .create_element("input")
-            .map_err(|error| anyhow::anyhow!("Failed to create input element: {error:?}"))?
-            .dyn_into()
-            .map_err(|error| anyhow::anyhow!("Created element is not an input: {error:?}"))?;
-        // IME needs a focused DOM input. Host `input` CSS must not unhide it.
-        for (name, value) in [
-            ("data-gpui-input", ""),
-            ("autocomplete", "off"),
-            ("autocorrect", "off"),
-            ("autocapitalize", "none"),
-            ("spellcheck", "false"),
-        ] {
-            input_element.set_attribute(name, value).map_err(|error| {
-                anyhow::anyhow!("Failed to configure the input element ({name}): {error:?}")
-            })?;
-        }
-        let input_style = input_element.style();
-        for (property, value) in [
-            ("position", "fixed"),
-            ("top", "0"),
-            ("left", "0"),
-            ("width", "1px"),
-            ("height", "1px"),
-            ("margin", "0"),
-            ("padding", "0"),
-            ("border", "0"),
-            ("outline", "none"),
-            ("opacity", "0"),
-            ("overflow", "hidden"),
-            ("background", "transparent"),
-            ("caret-color", "transparent"),
-            ("color", "transparent"),
-            ("pointer-events", "none"),
-            ("clip-path", "inset(50%)"),
-        ] {
-            input_style
-                .set_property_with_priority(property, value, "important")
-                .map_err(|error| {
-                    anyhow::anyhow!("Failed to hide the input element ({property}): {error:?}")
-                })?;
-        }
-        body.append_child(&input_element)
-            .map_err(|error| anyhow::anyhow!("Failed to append input to body: {error:?}"))?;
-        if let Err(error) = input_element.focus() {
-            log::error!("Failed to focus the input element: {error:?}");
-        }
-        Ok(input_element)
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         _handle: AnyWindowHandle,
@@ -192,7 +150,7 @@ impl WebWindow {
         };
         let renderer = WgpuRenderer::new_from_surface(context, surface, renderer_config)?;
 
-        let input_element = Self::create_hidden_text_input(&document, &body)?;
+        let ime_mirror = ImeMirror::new(&document, &body)?;
 
         let display: Rc<dyn PlatformDisplay> = Rc::new(WebDisplay::new(browser_window.clone()));
 
@@ -221,7 +179,7 @@ impl WebWindow {
         let inner = Rc::new(WebWindowInner {
             browser_window,
             canvas,
-            input_element,
+            ime_mirror,
             has_device_pixel_support,
             is_mac,
             state: RefCell::new(mutable_state),
@@ -231,6 +189,14 @@ impl WebWindow {
             last_physical_size: Cell::new((0, 0)),
             notify_scale: Cell::new(false),
             is_composing: Cell::new(false),
+            suppress_focus_status_events: Cell::new(false),
+            text_input_requested: Cell::new(false),
+            touch_drag: Cell::new(TouchDrag::None),
+            active_touch_id: Cell::new(None),
+            touch_start: Cell::new(Point::default()),
+            touch_last: Cell::new(Point::default()),
+            long_press_timer: Cell::new(None),
+            long_press_callback: RefCell::new(None),
             mql_handle: RefCell::new(None),
             pending_physical_size: Cell::new(None),
             raf_id: Cell::new(None),
@@ -367,6 +333,36 @@ impl WebWindow {
 }
 
 impl WebWindowInner {
+    fn window_insets(&self) -> WindowInsets {
+        let Some(viewport) = self.browser_window.visual_viewport() else {
+            return WindowInsets::default();
+        };
+        let Ok(layout_height) = self.browser_window.inner_height() else {
+            return WindowInsets::default();
+        };
+        let Some(layout_height) = layout_height.as_f64() else {
+            return WindowInsets::default();
+        };
+        // `height` counts layout pixels currently visible, so pinch zoom shrinks
+        // it exactly like a keyboard does. Scaling back to layout space keeps
+        // zoom out of the inset: only real occlusion survives. `offset_top` is
+        // pan, not occlusion, so it must not enter this.
+        let scale = viewport.scale();
+        let visible_height = if scale > 0.0 {
+            viewport.height() * scale
+        } else {
+            viewport.height()
+        };
+        let keyboard_height = (layout_height - visible_height).max(0.0) as f32;
+        WindowInsets {
+            safe_area: Edges::default(),
+            ime: Edges {
+                bottom: px(keyboard_height),
+                ..Edges::default()
+            },
+        }
+    }
+
     /// Invokes a registered callback with take/call/restore semantics.
     ///
     /// The callback is removed from the slot for the duration of the call, so
@@ -568,8 +564,7 @@ impl Drop for WebWindow {
 
         let canvas: &web_sys::Element = self.inner.canvas.as_ref();
         canvas.remove();
-        let input_element: &web_sys::Element = self.inner.input_element.as_ref();
-        input_element.remove();
+        self.inner.ime_mirror.remove();
         self.active_window.borrow_mut().take();
         self.lifecycle.set(WebWindowLifecycle::Closed);
     }
@@ -695,6 +690,10 @@ impl PlatformWindow for WebWindow {
 
     fn take_input_handler(&mut self) -> Option<PlatformInputHandler> {
         self.inner.state.borrow_mut().input_handler.take()
+    }
+
+    fn request_text_input(&self) {
+        self.inner.text_input_requested.set(true);
     }
 
     fn prompt(
@@ -846,7 +845,13 @@ impl PlatformWindow for WebWindow {
         Some(self.inner.state.borrow().renderer.gpu_specs())
     }
 
-    fn update_ime_position(&self, _bounds: Bounds<Pixels>) {}
+    fn update_ime_position(&self, bounds: Bounds<Pixels>) {
+        self.inner.ime_mirror.set_caret_bounds(bounds);
+    }
+
+    fn insets(&self) -> WindowInsets {
+        self.inner.window_insets()
+    }
 
     fn request_decorations(&self, _decorations: WindowDecorations) {}
 

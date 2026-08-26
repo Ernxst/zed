@@ -7,7 +7,6 @@ use crate::{
     },
 };
 use collections::{FxHashMap, FxHashSet};
-use stacksafe::{StackSafe, stacksafe};
 use std::{fmt::Debug, ops::Range};
 use taffy::{
     Cache, CacheTree, Display, compute_block_layout, compute_cached_layout, compute_flexbox_layout,
@@ -19,6 +18,11 @@ use taffy::{
         LayoutOutput, LayoutPartialTree, NodeId, TraversePartialTree,
     },
 };
+
+#[cfg(feature = "stacker")]
+type StackSafe<T> = stacksafe::StackSafe<T>;
+#[cfg(not(feature = "stacker"))]
+type StackSafe<T> = T;
 
 type NodeMeasureFn = StackSafe<
     Box<
@@ -414,20 +418,26 @@ impl TaffyLayoutEngine {
         + 'static,
     ) -> LayoutId {
         let taffy_style = style.to_taffy(rem_size, scale_factor);
+        let measure = Box::new(move |known, available, window: &mut Window, cx: &mut App| {
+            let (size, first_baseline) = measure(known, available, window, cx);
+            MeasuredLayout {
+                size,
+                first_baseline,
+            }
+        })
+            as Box<
+                dyn FnMut(
+                    Size<Option<Pixels>>,
+                    Size<AvailableSpace>,
+                    &mut Window,
+                    &mut App,
+                ) -> MeasuredLayout,
+            >;
+        #[cfg(feature = "stacker")]
+        let measure = StackSafe::new(measure);
 
-        self.taffy.new_node(
-            taffy_style,
-            &[],
-            Some(NodeContext::Dynamic(StackSafe::new(Box::new(
-                move |known, available, window, cx| {
-                    let (size, first_baseline) = measure(known, available, window, cx);
-                    MeasuredLayout {
-                        size,
-                        first_baseline,
-                    }
-                },
-            )))),
-        )
+        self.taffy
+            .new_node(taffy_style, &[], Some(NodeContext::Dynamic(measure)))
     }
 
     /// Treats any `auto` dimension of the given node's style as filling `size`.
@@ -507,7 +517,7 @@ impl TaffyLayoutEngine {
         Ok(edges)
     }
 
-    #[stacksafe]
+    #[cfg_attr(feature = "stacker", stacksafe::stacksafe)]
     pub fn compute_layout(
         &mut self,
         id: LayoutId,
