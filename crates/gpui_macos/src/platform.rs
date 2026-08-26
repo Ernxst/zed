@@ -284,8 +284,10 @@ impl MacPlatform {
     /// Call this before [`Platform::run`]. The observer runs on the display-link
     /// thread with a frame token, allowing a foreign main loop to schedule one
     /// event pump without using a timer as its frame clock. The host must
-    /// dispatch the token immediately before that pump. The callback itself
-    /// must return without blocking.
+    /// dispatch the token immediately before that pump. GPUI delivers at most
+    /// one token at a time per window; dispatching or dropping it releases the
+    /// next request, and stopping the window invalidates escaped tokens. The
+    /// callback itself must return without blocking.
     pub fn on_request_frame(&self, callback: impl Fn(crate::FrameRequest) + Send + Sync + 'static) {
         assert_main_thread("MacPlatform::on_request_frame");
         let mut state = self.0.lock();

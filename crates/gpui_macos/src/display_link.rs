@@ -43,6 +43,9 @@
 //! link start/stop happen on the main thread only, which keeps the `running`
 //! flag and the link's actual state consistent without holding the lock
 //! across the calls.
+//! Subscriber callbacks are snapshotted under that lock and invoked only after
+//! it is released; foreign host code never runs inside the registry critical
+//! section or unwinds across the CoreVideo callback.
 //!
 //! `std::sync::Mutex` rather than `parking_lot` is deliberate: on macOS it is
 //! currently backed by `os_unfair_lock`, whose priority donation resolves
@@ -59,6 +62,7 @@ use gpui_util::ResultExt;
 use std::{
     collections::{BTreeMap, btree_map},
     ffi::c_void,
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
@@ -81,19 +85,18 @@ impl Registry {
 struct DisplayEntry {
     link: sys::DisplayLink,
     running: bool,
-    subscribers: Vec<(
-        SubscriberId,
-        DispatchRetained<DispatchSource>,
-        Option<Arc<dyn Fn(FrameRequest) + Send + Sync>>,
-    )>,
+    subscribers: Vec<Subscriber>,
 }
 
-// SAFETY: Both fields wrapping raw pointers are refcounted handles to
-// thread-safe objects that are valid on any thread: `sys::DisplayLink` to a
-// CoreVideo object, and each subscriber's `DispatchRetained<DispatchSource>`
-// to a GCD object (which the display's io thread really does use, calling
-// `merge_data` from the output callback). All mutation of the entry itself
-// is serialized by the registry lock.
+struct Subscriber {
+    id: SubscriberId,
+    frame_requests: Arc<FrameRequestState>,
+    observer: Option<Arc<dyn Fn(FrameRequest) + Send + Sync>>,
+}
+
+// SAFETY: The CoreVideo link and the GCD source in each subscriber state are
+// refcounted, thread-safe handles. All entry mutation is serialized by the
+// registry lock, while each subscriber serializes its own request lifecycle.
 unsafe impl Send for DisplayEntry {}
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -129,14 +132,36 @@ unsafe extern "C" fn display_link_output_callback(
     display_id: *mut c_void,
 ) -> i32 {
     let display_id = display_id as usize as CGDirectDisplayID;
-    let registry = lock_registry();
-    if let Some(entry) = registry.displays.get(&display_id) {
-        for (_, frame_requests, observer) in &entry.subscribers {
-            if let Some(observer) = observer {
-                observer(FrameRequest(frame_requests.clone()));
-            } else {
-                frame_requests.merge_data(1);
+    let subscribers = {
+        let registry = lock_registry();
+        registry
+            .displays
+            .get(&display_id)
+            .map(|entry| {
+                entry
+                    .subscribers
+                    .iter()
+                    .map(|subscriber| {
+                        (
+                            subscriber.frame_requests.clone(),
+                            subscriber.observer.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+
+    for (frame_requests, observer) in subscribers {
+        let Some(frame_request) = frame_requests.claim() else {
+            continue;
+        };
+        if let Some(observer) = observer {
+            if catch_unwind(AssertUnwindSafe(|| observer(frame_request))).is_err() {
+                log::error!("embedded display-link frame observer panicked");
             }
+        } else {
+            frame_request.dispatch();
         }
     }
     0
@@ -144,7 +169,7 @@ unsafe extern "C" fn display_link_output_callback(
 
 fn subscribe(
     display_id: CGDirectDisplayID,
-    frame_requests: DispatchRetained<DispatchSource>,
+    frame_requests: Arc<FrameRequestState>,
     observer: Option<Arc<dyn Fn(FrameRequest) + Send + Sync>>,
 ) -> Result<SubscriberId> {
     debug_assert_main_thread();
@@ -184,9 +209,11 @@ fn subscribe(
                 anyhow::bail!("display link registry entry vanished for display {display_id}");
             }
         };
-        entry
-            .subscribers
-            .push((subscriber_id, frame_requests, observer));
+        entry.subscribers.push(Subscriber {
+            id: subscriber_id,
+            frame_requests: frame_requests.clone(),
+            observer,
+        });
         let link_to_start = if entry.running {
             None
         } else {
@@ -203,7 +230,9 @@ fn subscribe(
             let mut registry = lock_registry();
             if let Some(entry) = registry.displays.get_mut(&display_id) {
                 entry.running = false;
-                entry.subscribers.retain(|(id, _, _)| *id != subscriber_id);
+                entry
+                    .subscribers
+                    .retain(|subscriber| subscriber.id != subscriber_id);
             }
             return Err(error);
         }
@@ -220,7 +249,9 @@ fn unsubscribe(display_id: CGDirectDisplayID, subscriber_id: SubscriberId) {
         let Some(entry) = registry.displays.get_mut(&display_id) else {
             return;
         };
-        entry.subscribers.retain(|(id, _, _)| *id != subscriber_id);
+        entry
+            .subscribers
+            .retain(|subscriber| subscriber.id != subscriber_id);
         if entry.subscribers.is_empty() && entry.running {
             entry.running = false;
             Some(entry.link.clone())
@@ -236,15 +267,101 @@ fn unsubscribe(display_id: CGDirectDisplayID, subscriber_id: SubscriberId) {
     }
 }
 
-/// A display-link frame request that an embedded host can enqueue immediately
-/// before pumping the platform main loop.
-#[derive(Clone)]
-pub struct FrameRequest(DispatchRetained<DispatchSource>);
+struct FrameRequestLifecycle {
+    generation: u64,
+    active: bool,
+    outstanding: bool,
+}
+
+struct FrameRequestState {
+    source: DispatchRetained<DispatchSource>,
+    lifecycle: Mutex<FrameRequestLifecycle>,
+}
+
+impl FrameRequestState {
+    fn new(source: DispatchRetained<DispatchSource>) -> Self {
+        Self {
+            source,
+            lifecycle: Mutex::new(FrameRequestLifecycle {
+                generation: 0,
+                active: false,
+                outstanding: false,
+            }),
+        }
+    }
+
+    fn lock_lifecycle(&self) -> MutexGuard<'_, FrameRequestLifecycle> {
+        self.lifecycle
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn activate(&self) {
+        let mut lifecycle = self.lock_lifecycle();
+        lifecycle.generation = lifecycle.generation.wrapping_add(1);
+        lifecycle.active = true;
+        lifecycle.outstanding = false;
+    }
+
+    fn invalidate(&self) {
+        let mut lifecycle = self.lock_lifecycle();
+        lifecycle.generation = lifecycle.generation.wrapping_add(1);
+        lifecycle.active = false;
+        lifecycle.outstanding = false;
+    }
+
+    fn claim(self: &Arc<Self>) -> Option<FrameRequest> {
+        let generation = {
+            let mut lifecycle = self.lock_lifecycle();
+            if !lifecycle.active || lifecycle.outstanding {
+                return None;
+            }
+            lifecycle.outstanding = true;
+            lifecycle.generation
+        };
+        Some(FrameRequest {
+            state: self.clone(),
+            generation,
+            consumed: false,
+        })
+    }
+
+    fn consume(&self, generation: u64, dispatch: bool) -> bool {
+        let mut lifecycle = self.lock_lifecycle();
+        if !lifecycle.active || lifecycle.generation != generation || !lifecycle.outstanding {
+            return false;
+        }
+        if dispatch {
+            self.source.merge_data(1);
+        }
+        lifecycle.outstanding = false;
+        true
+    }
+}
+
+/// A single-use, generation-bound display-link frame request for an embedded
+/// host to enqueue immediately before pumping the platform main loop.
+pub struct FrameRequest {
+    state: Arc<FrameRequestState>,
+    generation: u64,
+    consumed: bool,
+}
 
 impl FrameRequest {
-    /// Enqueues this frame request on the platform main queue.
-    pub fn dispatch(self) {
-        self.0.merge_data(1);
+    /// Enqueues this frame request on the platform main queue. Returns false
+    /// when the originating window stopped or moved displays before dispatch.
+    pub fn dispatch(mut self) -> bool {
+        let dispatched = self.state.consume(self.generation, true);
+        self.consumed = true;
+        dispatched
+    }
+}
+
+impl Drop for FrameRequest {
+    fn drop(&mut self) {
+        if !self.consumed {
+            self.state.consume(self.generation, false);
+        }
     }
 }
 
@@ -252,7 +369,7 @@ impl FrameRequest {
 /// on. The wrapped dispatch source coalesces vsync ticks from the display's
 /// io thread and invokes `callback(data)` on the main queue.
 pub struct WindowFrameSource {
-    frame_requests: DispatchRetained<DispatchSource>,
+    frame_requests: Arc<FrameRequestState>,
     observer: Option<Arc<dyn Fn(FrameRequest) + Send + Sync>>,
     registration: Option<(CGDirectDisplayID, SubscriberId)>,
 }
@@ -278,7 +395,7 @@ impl WindowFrameSource {
             frame_requests
         };
         Self {
-            frame_requests,
+            frame_requests: Arc::new(FrameRequestState::new(frame_requests)),
             observer,
             registration: None,
         }
@@ -286,16 +403,24 @@ impl WindowFrameSource {
 
     pub fn start(&mut self, display_id: CGDirectDisplayID) -> Result<()> {
         self.stop();
-        let subscriber_id = subscribe(
+        self.frame_requests.activate();
+        let subscriber_id = match subscribe(
             display_id,
             self.frame_requests.clone(),
             self.observer.clone(),
-        )?;
+        ) {
+            Ok(subscriber_id) => subscriber_id,
+            Err(error) => {
+                self.frame_requests.invalidate();
+                return Err(error);
+            }
+        };
         self.registration = Some((display_id, subscriber_id));
         Ok(())
     }
 
     pub fn stop(&mut self) {
+        self.frame_requests.invalidate();
         if let Some((display_id, subscriber_id)) = self.registration.take() {
             unsubscribe(display_id, subscriber_id);
         }
@@ -310,7 +435,63 @@ impl Drop for WindowFrameSource {
         // it. Cancelling first guarantees the event handler never runs again;
         // its context points at the window's native view, which may be
         // deallocated after this.
-        self.frame_requests.cancel();
+        self.frame_requests.source.cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request_state() -> Arc<FrameRequestState> {
+        let source = unsafe {
+            let source = DispatchSource::new(
+                &raw const _dispatch_source_type_data_add as *mut _,
+                0,
+                0,
+                Some(DispatchQueue::main()),
+            );
+            source.resume();
+            source
+        };
+        Arc::new(FrameRequestState::new(source))
+    }
+
+    #[test]
+    fn coalesces_until_the_outstanding_request_is_consumed() {
+        let state = request_state();
+        state.activate();
+
+        let request = state.claim().expect("first request should be delivered");
+        assert!(state.claim().is_none());
+        drop(request);
+        assert!(state.claim().is_some());
+    }
+
+    #[test]
+    fn stale_requests_cannot_dispatch_after_stop() {
+        let state = request_state();
+        state.activate();
+        let request = state.claim().expect("request should be delivered");
+
+        state.invalidate();
+
+        assert!(!request.dispatch());
+    }
+
+    #[test]
+    fn stale_request_drop_does_not_release_a_new_generation() {
+        let state = request_state();
+        state.activate();
+        let stale = state.claim().expect("old request should be delivered");
+        state.invalidate();
+        state.activate();
+        let current = state.claim().expect("new request should be delivered");
+
+        drop(stale);
+
+        assert!(state.claim().is_none());
+        assert!(current.dispatch());
     }
 }
 
