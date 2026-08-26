@@ -4783,6 +4783,60 @@ impl Window {
             .request_measured_layout(style, rem_size, scale_factor, measure)
     }
 
+    /// Add a measured layout node with a first-line text baseline.
+    ///
+    /// The baseline is relative to the node's border-box top edge.
+    pub fn request_measured_layout_with_baseline<F>(
+        &mut self,
+        style: Style,
+        baseline: Pixels,
+        measure: F,
+    ) -> LayoutId
+    where
+        F: Fn(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>
+            + 'static,
+    {
+        self.invalidator.debug_assert_prepaint();
+
+        let rem_size = self.rem_size();
+        let scale_factor = self.scale_factor();
+        self.layout_engine
+            .as_mut()
+            .unwrap()
+            .request_measured_layout_with_baseline(
+                style,
+                rem_size,
+                scale_factor,
+                move |known, available, window, cx| {
+                    (measure(known, available, window, cx), Some(baseline))
+                },
+            )
+    }
+
+    pub(crate) fn request_measured_layout_with_computed_baseline<F>(
+        &mut self,
+        style: Style,
+        measure: F,
+    ) -> LayoutId
+    where
+        F: Fn(
+                Size<Option<Pixels>>,
+                Size<AvailableSpace>,
+                &mut Window,
+                &mut App,
+            ) -> (Size<Pixels>, Option<Pixels>)
+            + 'static,
+    {
+        self.invalidator.debug_assert_prepaint();
+
+        let rem_size = self.rem_size();
+        let scale_factor = self.scale_factor();
+        self.layout_engine
+            .as_mut()
+            .unwrap()
+            .request_measured_layout_with_baseline(style, rem_size, scale_factor, measure)
+    }
+
     /// Compute the layout for the given id within the given available space.
     /// This method is called for its side effect, typically by the framework prior to painting.
     /// After calling it, you can request the bounds of the given layout node id or any descendant.

@@ -10,10 +10,14 @@ use collections::{FxHashMap, FxHashSet};
 use stacksafe::{StackSafe, stacksafe};
 use std::{fmt::Debug, ops::Range};
 use taffy::{
-    TaffyTree, TraversePartialTree as _,
+    Cache, CacheTree, Display, compute_block_layout, compute_cached_layout, compute_flexbox_layout,
+    compute_grid_layout, compute_hidden_layout, compute_leaf_layout, compute_root_layout,
     geometry::{Point as TaffyPoint, Rect as TaffyRect, Size as TaffySize},
     style::AvailableSpace as TaffyAvailableSpace,
-    tree::NodeId,
+    tree::{
+        Layout, LayoutBlockContainer, LayoutFlexboxContainer, LayoutGridContainer, LayoutInput,
+        LayoutOutput, LayoutPartialTree, NodeId, TraversePartialTree,
+    },
 };
 
 type NodeMeasureFn = StackSafe<
@@ -23,15 +27,321 @@ type NodeMeasureFn = StackSafe<
             Size<AvailableSpace>,
             &mut Window,
             &mut App,
-        ) -> Size<Pixels>,
+        ) -> MeasuredLayout,
     >,
 >;
 
-struct NodeContext {
-    measure: NodeMeasureFn,
+#[derive(Clone, Copy)]
+struct MeasuredLayout {
+    size: Size<Pixels>,
+    first_baseline: Option<Pixels>,
 }
+
+enum NodeContext {
+    Dynamic(NodeMeasureFn),
+    #[cfg(test)]
+    Fixed(MeasuredLayout),
+}
+
+struct LayoutNode {
+    style: taffy::style::Style,
+    children: Vec<NodeId>,
+    parent: Option<NodeId>,
+    context: Option<NodeContext>,
+    cache: Cache,
+    layout: Layout,
+}
+
+/// GPUI's Taffy storage and low-level algorithm adaptor.
+///
+/// `TaffyTree::compute_layout_with_measure` accepts size-only measurements, so
+/// it cannot carry a shaped text baseline into `LayoutOutput`. Keeping the
+/// nodes here lets measured leaves return that metadata through Taffy's native
+/// flex, grid, and block algorithms without a renderer-side correction pass.
+#[derive(Default)]
+struct GpuiTaffyTree {
+    nodes: Vec<LayoutNode>,
+}
+
+impl GpuiTaffyTree {
+    fn clear(&mut self) {
+        self.nodes.clear();
+    }
+
+    fn new_node(
+        &mut self,
+        style: taffy::style::Style,
+        children: &[LayoutId],
+        context: Option<NodeContext>,
+    ) -> LayoutId {
+        let id = NodeId::from(self.nodes.len() as u64);
+        self.nodes.push(LayoutNode {
+            style,
+            children: children.iter().map(|child| child.0).collect(),
+            parent: None,
+            context,
+            cache: Cache::new(),
+            layout: Layout::new(),
+        });
+        for child in children {
+            self.node_mut(child.0).parent = Some(id);
+        }
+        LayoutId(id)
+    }
+
+    fn node(&self, id: NodeId) -> &LayoutNode {
+        &self.nodes[u64::from(id) as usize]
+    }
+
+    fn node_mut(&mut self, id: NodeId) -> &mut LayoutNode {
+        &mut self.nodes[u64::from(id) as usize]
+    }
+
+    fn children(&self, id: NodeId) -> Vec<NodeId> {
+        self.node(id).children.clone()
+    }
+
+    fn parent(&self, id: NodeId) -> Option<NodeId> {
+        self.node(id).parent
+    }
+
+    fn style(&self, id: NodeId) -> &taffy::style::Style {
+        &self.node(id).style
+    }
+
+    fn set_style(&mut self, id: NodeId, style: taffy::style::Style) {
+        self.node_mut(id).style = style;
+        self.clear_cache_upwards(id);
+    }
+
+    fn layout(&self, id: NodeId) -> &Layout {
+        &self.node(id).layout
+    }
+
+    fn clear_cache_upwards(&mut self, mut id: NodeId) {
+        loop {
+            self.node_mut(id).cache.clear();
+            let Some(parent) = self.parent(id) else {
+                break;
+            };
+            id = parent;
+        }
+    }
+}
+
+struct LayoutRun<'a> {
+    tree: &'a mut GpuiTaffyTree,
+    window: Option<&'a mut Window>,
+    cx: Option<&'a mut App>,
+    scale_factor: f32,
+}
+
+impl TraversePartialTree for LayoutRun<'_> {
+    type ChildIter<'a>
+        = std::iter::Copied<std::slice::Iter<'a, NodeId>>
+    where
+        Self: 'a;
+
+    fn child_ids(&self, parent_node_id: NodeId) -> Self::ChildIter<'_> {
+        self.tree.node(parent_node_id).children.iter().copied()
+    }
+
+    fn child_count(&self, parent_node_id: NodeId) -> usize {
+        self.tree.node(parent_node_id).children.len()
+    }
+
+    fn get_child_id(&self, parent_node_id: NodeId, child_index: usize) -> NodeId {
+        self.tree.node(parent_node_id).children[child_index]
+    }
+}
+
+impl CacheTree for LayoutRun<'_> {
+    fn cache_get(&self, node_id: NodeId, input: &LayoutInput) -> Option<LayoutOutput> {
+        self.tree.node(node_id).cache.get(input)
+    }
+
+    fn cache_store(&mut self, node_id: NodeId, input: &LayoutInput, output: LayoutOutput) {
+        self.tree.node_mut(node_id).cache.store(input, output);
+    }
+
+    fn cache_clear(&mut self, node_id: NodeId) {
+        self.tree.node_mut(node_id).cache.clear();
+    }
+}
+
+impl LayoutRun<'_> {
+    fn compute_node_layout(
+        &mut self,
+        node_id: NodeId,
+        inputs: LayoutInput,
+        block_context: Option<&mut taffy::BlockContext>,
+    ) -> LayoutOutput {
+        if inputs.run_mode == taffy::RunMode::PerformHiddenLayout {
+            return compute_hidden_layout(self, node_id);
+        }
+
+        compute_cached_layout(self, node_id, inputs, |tree, node_id, inputs| {
+            let style = tree.tree.style(node_id).clone();
+            let has_children = tree.child_count(node_id) > 0;
+
+            if style.display == Display::None {
+                return compute_hidden_layout(tree, node_id);
+            }
+
+            if !has_children {
+                let mut first_baseline = None;
+                let mut output = compute_leaf_layout(
+                    inputs,
+                    &style,
+                    |_, _| 0.0,
+                    |known_dimensions, available_space| {
+                        let known_dimensions = Size {
+                            width: known_dimensions
+                                .width
+                                .map(|dimension| Pixels(dimension / tree.scale_factor)),
+                            height: known_dimensions
+                                .height
+                                .map(|dimension| Pixels(dimension / tree.scale_factor)),
+                        };
+                        let untransform = |space: TaffyAvailableSpace| match space {
+                            TaffyAvailableSpace::Definite(pixels) => {
+                                AvailableSpace::Definite(Pixels(pixels / tree.scale_factor))
+                            }
+                            TaffyAvailableSpace::MinContent => AvailableSpace::MinContent,
+                            TaffyAvailableSpace::MaxContent => AvailableSpace::MaxContent,
+                        };
+                        let available_space = size(
+                            untransform(available_space.width),
+                            untransform(available_space.height),
+                        );
+                        let measured = match tree.tree.node_mut(node_id).context.as_mut() {
+                            Some(NodeContext::Dynamic(measure)) => measure(
+                                known_dimensions,
+                                available_space,
+                                tree.window
+                                    .as_deref_mut()
+                                    .expect("window required to measure"),
+                                tree.cx.as_deref_mut().expect("app required to measure"),
+                            ),
+                            #[cfg(test)]
+                            Some(NodeContext::Fixed(measured)) => *measured,
+                            None => MeasuredLayout {
+                                size: Size::default(),
+                                first_baseline: None,
+                            },
+                        };
+                        // Taffy aligns the baseline metadata by moving the child's box. Both
+                        // that box origin and the painted glyph baseline ultimately land on
+                        // whole device pixels, so align the same quantized metric here.
+                        first_baseline = measured
+                            .first_baseline
+                            .map(|baseline| round_to_device_pixel(baseline.0, tree.scale_factor));
+                        snap_measured_size_to_device_pixels(measured.size, tree.scale_factor).into()
+                    },
+                );
+                output.first_baselines.y = first_baseline;
+                return output;
+            }
+
+            match style.display {
+                Display::None => unreachable!(),
+                Display::Block => compute_block_layout(tree, node_id, inputs, block_context),
+                Display::FlowRoot => compute_block_layout(tree, node_id, inputs, None),
+                Display::Flex => compute_flexbox_layout(tree, node_id, inputs),
+                Display::Grid => compute_grid_layout(tree, node_id, inputs),
+            }
+        })
+    }
+}
+
+impl LayoutPartialTree for LayoutRun<'_> {
+    type CustomIdent = String;
+    type CoreContainerStyle<'a>
+        = &'a taffy::style::Style
+    where
+        Self: 'a;
+
+    fn get_core_container_style(&self, node_id: NodeId) -> Self::CoreContainerStyle<'_> {
+        self.tree.style(node_id)
+    }
+
+    fn set_unrounded_layout(&mut self, node_id: NodeId, layout: &Layout) {
+        self.tree.node_mut(node_id).layout = *layout;
+    }
+
+    fn compute_child_layout(&mut self, node_id: NodeId, inputs: LayoutInput) -> LayoutOutput {
+        self.compute_node_layout(node_id, inputs, None)
+    }
+}
+
+impl LayoutFlexboxContainer for LayoutRun<'_> {
+    type FlexboxContainerStyle<'a>
+        = &'a taffy::style::Style
+    where
+        Self: 'a;
+    type FlexboxItemStyle<'a>
+        = &'a taffy::style::Style
+    where
+        Self: 'a;
+
+    fn get_flexbox_container_style(&self, node_id: NodeId) -> Self::FlexboxContainerStyle<'_> {
+        self.tree.style(node_id)
+    }
+
+    fn get_flexbox_child_style(&self, child_node_id: NodeId) -> Self::FlexboxItemStyle<'_> {
+        self.tree.style(child_node_id)
+    }
+}
+
+impl LayoutGridContainer for LayoutRun<'_> {
+    type GridContainerStyle<'a>
+        = &'a taffy::style::Style
+    where
+        Self: 'a;
+    type GridItemStyle<'a>
+        = &'a taffy::style::Style
+    where
+        Self: 'a;
+
+    fn get_grid_container_style(&self, node_id: NodeId) -> Self::GridContainerStyle<'_> {
+        self.tree.style(node_id)
+    }
+
+    fn get_grid_child_style(&self, child_node_id: NodeId) -> Self::GridItemStyle<'_> {
+        self.tree.style(child_node_id)
+    }
+}
+
+impl LayoutBlockContainer for LayoutRun<'_> {
+    type BlockContainerStyle<'a>
+        = &'a taffy::style::Style
+    where
+        Self: 'a;
+    type BlockItemStyle<'a>
+        = &'a taffy::style::Style
+    where
+        Self: 'a;
+
+    fn get_block_container_style(&self, node_id: NodeId) -> Self::BlockContainerStyle<'_> {
+        self.tree.style(node_id)
+    }
+
+    fn get_block_child_style(&self, child_node_id: NodeId) -> Self::BlockItemStyle<'_> {
+        self.tree.style(child_node_id)
+    }
+
+    fn compute_block_child_layout(
+        &mut self,
+        node_id: NodeId,
+        inputs: LayoutInput,
+        context: Option<&mut taffy::BlockContext>,
+    ) -> LayoutOutput {
+        self.compute_node_layout(node_id, inputs, context)
+    }
+}
+
 pub struct TaffyLayoutEngine {
-    taffy: TaffyTree<NodeContext>,
+    taffy: GpuiTaffyTree,
     absolute_layout_bounds: FxHashMap<LayoutId, Bounds<Pixels>>,
     /// Unrounded absolute border-box top-left per-node coordinate in device pixels.
     absolute_outer_origins: FxHashMap<LayoutId, Point<f32>>,
@@ -39,14 +349,10 @@ pub struct TaffyLayoutEngine {
     layout_bounds_scratch_space: Vec<LayoutId>,
 }
 
-const EXPECT_MESSAGE: &str = "we should avoid taffy layout errors by construction if possible";
-
 impl TaffyLayoutEngine {
     pub fn new() -> Self {
-        let mut taffy = TaffyTree::new();
-        taffy.disable_rounding();
         TaffyLayoutEngine {
-            taffy,
+            taffy: GpuiTaffyTree::default(),
             absolute_layout_bounds: FxHashMap::default(),
             absolute_outer_origins: FxHashMap::default(),
             computed_layouts: FxHashSet::default(),
@@ -70,18 +376,7 @@ impl TaffyLayoutEngine {
     ) -> LayoutId {
         let taffy_style = style.to_taffy(rem_size, scale_factor);
 
-        if children.is_empty() {
-            self.taffy
-                .new_leaf(taffy_style)
-                .expect(EXPECT_MESSAGE)
-                .into()
-        } else {
-            self.taffy
-                // This is safe because LayoutId is repr(transparent) to taffy::tree::NodeId.
-                .new_with_children(taffy_style, LayoutId::to_taffy_slice(children))
-                .expect(EXPECT_MESSAGE)
-                .into()
-        }
+        self.taffy.new_node(taffy_style, children, None)
     }
 
     pub fn request_measured_layout(
@@ -89,7 +384,7 @@ impl TaffyLayoutEngine {
         style: Style,
         rem_size: Pixels,
         scale_factor: f32,
-        measure: impl FnMut(
+        mut measure: impl FnMut(
             Size<Option<Pixels>>,
             Size<AvailableSpace>,
             &mut Window,
@@ -97,17 +392,42 @@ impl TaffyLayoutEngine {
         ) -> Size<Pixels>
         + 'static,
     ) -> LayoutId {
+        self.request_measured_layout_with_baseline(
+            style,
+            rem_size,
+            scale_factor,
+            move |known, available, window, cx| (measure(known, available, window, cx), None),
+        )
+    }
+
+    pub fn request_measured_layout_with_baseline(
+        &mut self,
+        style: Style,
+        rem_size: Pixels,
+        scale_factor: f32,
+        mut measure: impl FnMut(
+            Size<Option<Pixels>>,
+            Size<AvailableSpace>,
+            &mut Window,
+            &mut App,
+        ) -> (Size<Pixels>, Option<Pixels>)
+        + 'static,
+    ) -> LayoutId {
         let taffy_style = style.to_taffy(rem_size, scale_factor);
 
-        self.taffy
-            .new_leaf_with_context(
-                taffy_style,
-                NodeContext {
-                    measure: StackSafe::new(Box::new(measure)),
+        self.taffy.new_node(
+            taffy_style,
+            &[],
+            Some(NodeContext::Dynamic(StackSafe::new(Box::new(
+                move |known, available, window, cx| {
+                    let (size, first_baseline) = measure(known, available, window, cx);
+                    MeasuredLayout {
+                        size,
+                        first_baseline,
+                    }
                 },
-            )
-            .expect(EXPECT_MESSAGE)
-            .into()
+            )))),
+        )
     }
 
     /// Treats any `auto` dimension of the given node's style as filling `size`.
@@ -122,7 +442,7 @@ impl TaffyLayoutEngine {
         size: Size<Pixels>,
         scale_factor: f32,
     ) {
-        let style = self.taffy.style(id.0).expect(EXPECT_MESSAGE);
+        let style = self.taffy.style(id.0);
         let stretch_width = style.size.width.is_auto();
         let stretch_height = style.size.height.is_auto();
         if !stretch_width && !stretch_height {
@@ -137,7 +457,7 @@ impl TaffyLayoutEngine {
             style.size.height =
                 taffy::style::Dimension::length(round_to_device_pixel(size.height.0, scale_factor));
         }
-        self.taffy.set_style(id.0, style).expect(EXPECT_MESSAGE);
+        self.taffy.set_style(id.0, style);
     }
 
     // Used to understand performance
@@ -145,7 +465,7 @@ impl TaffyLayoutEngine {
     fn count_all_children(&self, parent: LayoutId) -> anyhow::Result<u32> {
         let mut count = 0;
 
-        for child in self.taffy.children(parent.0)? {
+        for child in self.taffy.children(parent.0) {
             // Count this child.
             count += 1;
 
@@ -161,12 +481,12 @@ impl TaffyLayoutEngine {
     fn max_depth(&self, depth: u32, parent: LayoutId) -> anyhow::Result<u32> {
         println!(
             "{parent:?} at depth {depth} has {} children",
-            self.taffy.child_count(parent.0)
+            self.taffy.node(parent.0).children.len()
         );
 
         let mut max_child_depth = 0;
 
-        for child in self.taffy.children(parent.0)? {
+        for child in self.taffy.children(parent.0) {
             max_child_depth = std::cmp::max(max_child_depth, self.max_depth(0, LayoutId(child))?);
         }
 
@@ -178,7 +498,7 @@ impl TaffyLayoutEngine {
     fn get_edges(&self, parent: LayoutId) -> anyhow::Result<Vec<(LayoutId, LayoutId)>> {
         let mut edges = Vec::new();
 
-        for child in self.taffy.children(parent.0)? {
+        for child in self.taffy.children(parent.0) {
             edges.push((parent, LayoutId(child)));
 
             edges.extend(self.get_edges(LayoutId(child))?);
@@ -215,7 +535,6 @@ impl TaffyLayoutEngine {
                 stack.extend(
                     self.taffy
                         .children(id.into())
-                        .expect(EXPECT_MESSAGE)
                         .into_iter()
                         .map(LayoutId::from),
                 );
@@ -236,39 +555,13 @@ impl TaffyLayoutEngine {
             transform(available_space.height),
         );
 
-        self.taffy
-            .compute_layout_with_measure(
-                id.into(),
-                available_space.into(),
-                |known_dimensions, available_space, _id, node_context, _style| {
-                    let Some(node_context) = node_context else {
-                        return taffy::geometry::Size::default();
-                    };
-
-                    let known_dimensions = Size {
-                        width: known_dimensions.width.map(|e| Pixels(e / scale_factor)),
-                        height: known_dimensions.height.map(|e| Pixels(e / scale_factor)),
-                    };
-
-                    let available_space: Size<AvailableSpace> = available_space.into();
-                    let untransform = |ev: AvailableSpace| match ev {
-                        AvailableSpace::Definite(pixels) => {
-                            AvailableSpace::Definite(Pixels(pixels.0 / scale_factor))
-                        }
-                        AvailableSpace::MinContent => AvailableSpace::MinContent,
-                        AvailableSpace::MaxContent => AvailableSpace::MaxContent,
-                    };
-                    let available_space = size(
-                        untransform(available_space.width),
-                        untransform(available_space.height),
-                    );
-
-                    let measured_size: Size<Pixels> =
-                        (node_context.measure)(known_dimensions, available_space, window, cx);
-                    snap_measured_size_to_device_pixels(measured_size, scale_factor).into()
-                },
-            )
-            .expect(EXPECT_MESSAGE);
+        let mut tree = LayoutRun {
+            tree: &mut self.taffy,
+            window: Some(window),
+            cx: Some(cx),
+            scale_factor,
+        };
+        compute_root_layout(&mut tree, id.into(), available_space.into());
     }
 
     // Pixel snapping
@@ -351,7 +644,7 @@ impl TaffyLayoutEngine {
             return layout;
         }
 
-        let layout = self.taffy.layout(id.into()).expect(EXPECT_MESSAGE);
+        let layout = self.taffy.layout(id.into());
         let layout_location = layout.location;
         let layout_size = layout.size;
         let parent = self.taffy.parent(id.0);
@@ -387,13 +680,6 @@ impl TaffyLayoutEngine {
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(transparent)]
 pub struct LayoutId(NodeId);
-
-impl LayoutId {
-    fn to_taffy_slice(node_ids: &[Self]) -> &[taffy::NodeId] {
-        // SAFETY: LayoutId is repr(transparent) to taffy::tree::NodeId.
-        unsafe { std::mem::transmute::<&[LayoutId], &[taffy::NodeId]>(node_ids) }
-    }
-}
 
 impl std::hash::Hash for LayoutId {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -765,6 +1051,238 @@ impl From<Size<Pixels>> for Size<AvailableSpace> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::px;
+    use taffy::{AlignContent, AlignItems, FlexDirection, FlexWrap, style_helpers::length};
+
+    fn fixed_leaf(
+        tree: &mut GpuiTaffyTree,
+        width: f32,
+        height: f32,
+        first_baseline: Option<f32>,
+    ) -> LayoutId {
+        let mut style = taffy::style::Style::default();
+        style.size.width = length(width);
+        tree.new_node(
+            style,
+            &[],
+            Some(NodeContext::Fixed(MeasuredLayout {
+                size: size(Pixels(width), Pixels(height)),
+                first_baseline: first_baseline.map(Pixels),
+            })),
+        )
+    }
+
+    fn fixed_sized_leaf(
+        tree: &mut GpuiTaffyTree,
+        width: f32,
+        height: f32,
+        first_baseline: Option<f32>,
+    ) -> LayoutId {
+        let mut style = taffy::style::Style::default();
+        style.size = TaffySize {
+            width: length(width),
+            height: length(height),
+        };
+        tree.new_node(
+            style,
+            &[],
+            Some(NodeContext::Fixed(MeasuredLayout {
+                size: size(Pixels(width), Pixels(height)),
+                first_baseline: first_baseline.map(Pixels),
+            })),
+        )
+    }
+
+    fn flex_container(
+        tree: &mut GpuiTaffyTree,
+        children: &[LayoutId],
+        configure: impl FnOnce(&mut taffy::style::Style),
+    ) -> LayoutId {
+        let mut style = taffy::style::Style {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Row,
+            align_items: Some(AlignItems::BASELINE),
+            ..Default::default()
+        };
+        configure(&mut style);
+        tree.new_node(style, children, None)
+    }
+
+    fn compute_test_layout_at_scale(tree: &mut GpuiTaffyTree, root: LayoutId, scale_factor: f32) {
+        let mut run = LayoutRun {
+            tree,
+            window: None,
+            cx: None,
+            scale_factor,
+        };
+        compute_root_layout(
+            &mut run,
+            root.into(),
+            TaffySize {
+                width: TaffyAvailableSpace::MaxContent,
+                height: TaffyAvailableSpace::MaxContent,
+            },
+        );
+    }
+
+    fn compute_test_layout(tree: &mut GpuiTaffyTree, root: LayoutId) {
+        compute_test_layout_at_scale(tree, root, 1.);
+    }
+
+    fn bottom(layout: &Layout) -> f32 {
+        layout.location.y + layout.size.height
+    }
+
+    #[test]
+    fn measured_baselines_are_scoped_to_each_compute_root() {
+        let mut tree = GpuiTaffyTree::default();
+        let first_large = fixed_leaf(&mut tree, 20., 32., Some(24.));
+        let first_small = fixed_leaf(&mut tree, 20., 12., Some(9.));
+        let first_root = flex_container(&mut tree, &[first_large, first_small], |_| {});
+        let second_large = fixed_leaf(&mut tree, 20., 32., Some(24.));
+        let second_small = fixed_leaf(&mut tree, 20., 12., Some(9.));
+        let second_root = flex_container(&mut tree, &[second_large, second_small], |_| {});
+
+        compute_test_layout(&mut tree, first_root);
+        compute_test_layout(&mut tree, second_root);
+
+        assert_eq!(tree.layout(first_large.0).location.y, 0.);
+        assert_eq!(tree.layout(second_large.0).location.y, 0.);
+        assert_eq!(tree.layout(first_small.0).location.y, 15.);
+        assert_eq!(tree.layout(second_small.0).location.y, 15.);
+    }
+
+    #[test]
+    fn wrapped_flex_lines_align_their_own_baseline_groups() {
+        let mut tree = GpuiTaffyTree::default();
+        let leaves = [
+            fixed_leaf(&mut tree, 30., 32., Some(24.)),
+            fixed_leaf(&mut tree, 30., 12., Some(9.)),
+            fixed_leaf(&mut tree, 30., 32., Some(24.)),
+            fixed_leaf(&mut tree, 30., 12., Some(9.)),
+        ];
+        let root = flex_container(&mut tree, &leaves, |style| {
+            style.flex_wrap = FlexWrap::Wrap;
+            style.align_content = Some(AlignContent::STRETCH);
+            style.size = TaffySize {
+                width: length(60.),
+                height: length(104.),
+            };
+        });
+
+        compute_test_layout(&mut tree, root);
+
+        let layouts = leaves.map(|leaf| *tree.layout(leaf.0));
+        assert!(layouts[0].location.y < layouts[2].location.y);
+        assert!(bottom(&layouts[0]) <= layouts[2].location.y);
+        assert!(bottom(&layouts[1]) < bottom(&layouts[0]));
+        assert!(bottom(&layouts[3]) < bottom(&layouts[2]));
+    }
+
+    #[test]
+    fn baseline_less_flex_items_synthesize_their_bottom_edge() {
+        let mut tree = GpuiTaffyTree::default();
+        let box_node = fixed_leaf(&mut tree, 32., 32., None);
+        let text_node = fixed_leaf(&mut tree, 20., 16., Some(12.));
+        let root = flex_container(&mut tree, &[box_node, text_node], |_| {});
+
+        compute_test_layout(&mut tree, root);
+
+        assert!(bottom(tree.layout(text_node.0)) > bottom(tree.layout(box_node.0)));
+        assert!(tree.layout(root.0).size.height > tree.layout(box_node.0).size.height);
+    }
+
+    #[test]
+    fn explicitly_sized_measured_leaves_preserve_their_baselines() {
+        let mut tree = GpuiTaffyTree::default();
+        let large = fixed_sized_leaf(&mut tree, 20., 32., Some(24.));
+        let small = fixed_sized_leaf(&mut tree, 20., 12., Some(9.));
+        let root = flex_container(&mut tree, &[large, small], |_| {});
+
+        compute_test_layout(&mut tree, root);
+
+        assert_eq!(tree.layout(large.0).location.y, 0.);
+        assert_eq!(tree.layout(small.0).location.y, 15.);
+    }
+
+    #[test]
+    fn nested_flex_containers_export_their_corrected_first_baseline() {
+        let mut tree = GpuiTaffyTree::default();
+        let nested_small = fixed_leaf(&mut tree, 20., 12., Some(9.));
+        let nested_large = fixed_leaf(&mut tree, 20., 32., Some(24.));
+        let nested = flex_container(&mut tree, &[nested_small, nested_large], |_| {});
+        let outer_small = fixed_leaf(&mut tree, 20., 12., Some(9.));
+        let root = flex_container(&mut tree, &[nested, outer_small], |_| {});
+
+        compute_test_layout(&mut tree, root);
+
+        let nested_origin = tree.layout(nested.0).location.y;
+        let nested_small_y = nested_origin + tree.layout(nested_small.0).location.y;
+        let nested_large_y = nested_origin + tree.layout(nested_large.0).location.y;
+        assert_eq!(nested_small_y, tree.layout(outer_small.0).location.y);
+        assert!(nested_large_y < nested_small_y);
+    }
+
+    #[test]
+    fn fractional_baselines_remain_aligned_after_layout_and_paint_snapping() {
+        let scale_factor = 1.25;
+        let large_baseline = 24.3 / scale_factor;
+        let small_baseline = 9.7 / scale_factor;
+        let mut tree = GpuiTaffyTree::default();
+        let large = fixed_leaf(&mut tree, 20., 32. / scale_factor, Some(large_baseline));
+        let small = fixed_leaf(&mut tree, 20., 12. / scale_factor, Some(small_baseline));
+        let root = flex_container(&mut tree, &[large, small], |_| {});
+
+        compute_test_layout_at_scale(&mut tree, root, scale_factor);
+
+        let painted_baseline = |node: LayoutId, baseline: f32| {
+            let snapped_origin = round_half_toward_zero(tree.layout(node.0).location.y);
+            round_half_toward_zero(snapped_origin + baseline * scale_factor)
+        };
+        assert_eq!(
+            painted_baseline(large, large_baseline),
+            painted_baseline(small, small_baseline)
+        );
+    }
+
+    #[test]
+    fn custom_tree_dispatches_block_grid_and_hidden_layouts() {
+        let mut tree = GpuiTaffyTree::default();
+
+        let first_block_child = fixed_leaf(&mut tree, 10., 10., None);
+        let second_block_child = fixed_leaf(&mut tree, 10., 20., None);
+        let block = tree.new_node(
+            taffy::style::Style {
+                display: Display::Block,
+                ..Default::default()
+            },
+            &[first_block_child, second_block_child],
+            None,
+        );
+        compute_test_layout(&mut tree, block);
+        assert_eq!(tree.layout(second_block_child.0).location.y, 10.);
+        assert_eq!(tree.layout(block.0).size.height, 30.);
+
+        let first_grid_child = fixed_leaf(&mut tree, 10., 10., None);
+        let second_grid_child = fixed_leaf(&mut tree, 10., 10., None);
+        let grid = tree.new_node(
+            taffy::style::Style {
+                display: Display::Grid,
+                grid_template_columns: vec![length(20.), length(20.)],
+                ..Default::default()
+            },
+            &[first_grid_child, second_grid_child],
+            None,
+        );
+        compute_test_layout(&mut tree, grid);
+        assert_eq!(tree.layout(first_grid_child.0).location.x, 0.);
+        assert_eq!(tree.layout(second_grid_child.0).location.x, 20.);
+
+        let hidden = fixed_leaf(&mut tree, 40., 40., Some(30.));
+        tree.node_mut(hidden.0).style.display = Display::None;
+        compute_test_layout(&mut tree, hidden);
+        assert_eq!(tree.layout(hidden.0).size, TaffySize::ZERO);
+    }
 
     #[test]
     fn border_widths_to_taffy_use_stroke_snapping() {

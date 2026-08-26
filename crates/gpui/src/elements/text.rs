@@ -644,7 +644,7 @@ impl TextLayout {
         } else {
             vec![text_style.to_run(text.len())]
         };
-        window.request_measured_layout(Default::default(), {
+        window.request_measured_layout_with_computed_baseline(Default::default(), {
             let element_state = self.clone();
 
             move |known_dimensions, available_space, window, cx| {
@@ -690,7 +690,7 @@ impl TextLayout {
                     && truncate_width.is_none()
                     && text_layout.truncate_width.is_none()
                 {
-                    return size;
+                    return (size, first_line_baseline(&text_layout.lines, line_height));
                 }
 
                 let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
@@ -755,7 +755,7 @@ impl TextLayout {
                         size: Some(Size::default()),
                         bounds: None,
                     });
-                    return Size::default();
+                    return (Size::default(), None);
                 };
 
                 let mut size: Size<Pixels> = Size::default();
@@ -765,6 +765,7 @@ impl TextLayout {
                     size.width = size.width.max(line_size.width).ceil();
                 }
 
+                let first_baseline = first_line_baseline(&lines, line_height);
                 element_state.0.borrow_mut().replace(TextLayoutInner {
                     lines,
                     len,
@@ -775,7 +776,7 @@ impl TextLayout {
                     bounds: None,
                 });
 
-                size
+                (size, first_baseline)
             }
         })
     }
@@ -975,6 +976,12 @@ impl TextLayout {
         accumulator.pop();
         accumulator
     }
+}
+
+fn first_line_baseline(lines: &[WrappedLine], line_height: Pixels) -> Option<Pixels> {
+    let first_line = lines.first()?;
+    let leading = line_height - first_line.ascent() - first_line.descent();
+    Some(leading / 2. + first_line.ascent())
 }
 
 /// A text element that can be interacted with.
@@ -1280,6 +1287,7 @@ impl IntoElement for InteractiveText {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{FontId, LineLayout, ShapedRun, px};
 
     #[test]
     fn test_into_element_for() {
@@ -1309,5 +1317,31 @@ mod tests {
             make_text_unstable_id(false).id,
             make_text_unstable_id(true).id
         );
+    }
+
+    #[test]
+    fn first_baseline_uses_the_shaped_first_line_metrics() {
+        let line = WrappedLine {
+            layout: Arc::new(WrappedLineLayout {
+                unwrapped_layout: Arc::new(LineLayout {
+                    font_size: px(18.),
+                    width: px(20.),
+                    ascent: px(14.),
+                    descent: px(4.),
+                    runs: vec![ShapedRun {
+                        font_id: FontId(42),
+                        glyphs: Vec::new(),
+                    }],
+                    len: 1,
+                }),
+                wrap_boundaries: Default::default(),
+                wrap_width: None,
+            }),
+            text: "x".into(),
+            decoration_runs: Vec::new(),
+        };
+
+        assert_eq!(line.runs()[0].font_id, FontId(42));
+        assert_eq!(first_line_baseline(&[line], px(20.)), Some(px(15.)));
     }
 }
