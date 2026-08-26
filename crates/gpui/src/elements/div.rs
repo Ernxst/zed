@@ -2781,7 +2781,7 @@ impl Interactivity {
                 let current_view = window.current_view();
 
                 window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
-                    let group_hovered = group_hitbox_id.is_hovered(window);
+                    let group_hovered = group_hitbox_is_hovered(group_hitbox_id, window);
                     let was_group_hovered = hover_state
                         .as_ref()
                         .is_some_and(|state| state.borrow().group);
@@ -3206,10 +3206,10 @@ impl Interactivity {
             .and_then(|group_hover| GroupHitboxes::get(&group_hover.group, cx));
 
         if let Some(group_hitbox) = group_hitbox {
-            let was_hovered = group_hitbox.is_hovered(window);
+            let was_hovered = group_hitbox_is_hovered(group_hitbox, window);
             let current_view = window.current_view();
             window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
-                let hovered = group_hitbox.is_hovered(window);
+                let hovered = group_hitbox_is_hovered(group_hitbox, window);
                 if phase == DispatchPhase::Capture && hovered != was_hovered {
                     cx.notify(current_view);
                 }
@@ -3334,7 +3334,7 @@ impl Interactivity {
             if let Some(group_hover) = self.group_hover_style.as_ref() {
                 let is_group_hovered =
                     if let Some(group_hitbox_id) = GroupHitboxes::get(&group_hover.group, cx) {
-                        group_hitbox_id.is_hovered(window)
+                        group_hitbox_is_hovered(group_hitbox_id, window)
                     } else if let Some(element_state) = element_state.as_ref() {
                         element_state
                             .hover_state
@@ -3870,6 +3870,13 @@ fn handle_tooltip_check_visible_and_update(
 #[derive(Default)]
 pub(crate) struct GroupHitboxes(HashMap<SharedString, SmallVec<[HitboxId; 1]>>);
 
+fn group_hitbox_is_hovered(hitbox_id: HitboxId, window: &Window) -> bool {
+    // Group hover is spatial: pointer capture changes the event target, not whether
+    // the pointer remains within the group's hit-test bounds. The scroll hit test
+    // also reaches a group behind an in-flow BlockMouseExceptScroll descendant.
+    !window.last_input_was_keyboard() && hitbox_id.should_handle_scroll(window)
+}
+
 impl Global for GroupHitboxes {}
 
 impl GroupHitboxes {
@@ -4378,6 +4385,118 @@ mod tests {
         assert_eq!(render_count.get(), initial_render_count + 2);
         assert_eq!(anonymous_paint_count.get(), 1);
         assert_eq!(stateful_width.get(), px(10.));
+    }
+
+    struct GroupHoverCaptureTestView {
+        capture_group: bool,
+        target_width: Rc<Cell<Pixels>>,
+    }
+
+    impl Render for GroupHoverCaptureTestView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let mut group = div()
+                .ml(px(20.))
+                .mt(px(20.))
+                .size(px(100.))
+                .relative()
+                .group("capture-group");
+            if self.capture_group {
+                group = group.capture_pointer();
+            }
+
+            let mut child = div()
+                .id("capture-child")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size(px(40.));
+            if !self.capture_group {
+                child = child.capture_pointer();
+            }
+
+            let target_width = self.target_width.clone();
+            div().size_full().child(
+                group.child(child).child(
+                    div()
+                        .id("capture-group-hover-target")
+                        .absolute()
+                        .bottom_0()
+                        .right_0()
+                        .size(px(10.))
+                        .group_hover("capture-group", |style| style.size(px(20.)))
+                        .child(canvas(
+                            move |bounds, _, _| target_width.set(bounds.size.width),
+                            |_, _, _, _| {},
+                        )),
+                ),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn group_hover_tracks_pointer_while_a_child_has_capture(cx: &mut TestAppContext) {
+        let target_width = Rc::new(Cell::new(px(0.)));
+        let (_view, cx) = cx.add_window_view({
+            let target_width = target_width.clone();
+            move |_, _| GroupHoverCaptureTestView {
+                capture_group: false,
+                target_width,
+            }
+        });
+
+        cx.simulate_mouse_move(
+            point(px(30.), px(30.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        assert_eq!(target_width.get(), px(20.));
+        cx.simulate_mouse_down(
+            point(px(30.), px(30.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_move(
+            point(px(100.), px(30.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        assert_eq!(target_width.get(), px(20.));
+        cx.simulate_mouse_move(
+            point(px(150.), px(30.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        assert_eq!(target_width.get(), px(10.));
+    }
+
+    #[gpui::test]
+    fn group_hover_clears_outside_while_the_group_has_capture(cx: &mut TestAppContext) {
+        let target_width = Rc::new(Cell::new(px(0.)));
+        let (_view, cx) = cx.add_window_view({
+            let target_width = target_width.clone();
+            move |_, _| GroupHoverCaptureTestView {
+                capture_group: true,
+                target_width,
+            }
+        });
+
+        cx.simulate_mouse_move(
+            point(px(80.), px(30.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        assert_eq!(target_width.get(), px(20.));
+        cx.simulate_mouse_down(
+            point(px(80.), px(30.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_move(
+            point(px(150.), px(30.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        assert_eq!(target_width.get(), px(10.));
     }
 
     struct HoverListenerLayoutTestView {
