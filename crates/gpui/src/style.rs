@@ -444,6 +444,8 @@ pub enum WhiteSpace {
     Normal,
     /// No line wrapping, text will overflow the width of the element
     Nowrap,
+    /// Preserve explicit newlines and repeated spaces without soft wrapping.
+    Pre,
 }
 
 /// How to truncate text that overflows the width of the element

@@ -648,7 +648,7 @@ impl TextLayout {
             let element_state = self.clone();
 
             move |known_dimensions, available_space, window, cx| {
-                let wrap_width = if text_style.white_space == WhiteSpace::Normal {
+                let wrap_width = if whitespace_soft_wraps(text_style.white_space) {
                     known_dimensions.width.or(match available_space.width {
                         crate::AvailableSpace::Definite(x) => Some(x),
                         _ => None,
@@ -976,6 +976,13 @@ impl TextLayout {
         accumulator.pop();
         accumulator
     }
+}
+
+/// `pre` shares nowrap's no-soft-wrap layout path, but unlike a workaround
+/// that splits React nodes it still reaches `shape_text` with its original
+/// newlines and repeated spaces intact.
+fn whitespace_soft_wraps(white_space: WhiteSpace) -> bool {
+    white_space == WhiteSpace::Normal
 }
 
 fn first_line_baseline(lines: &[WrappedLine], line_height: Pixels) -> Option<Pixels> {
@@ -1343,5 +1350,12 @@ mod tests {
 
         assert_eq!(line.runs()[0].font_id, FontId(42));
         assert_eq!(first_line_baseline(&[line], px(20.)), Some(px(15.)));
+    }
+
+    #[test]
+    fn preformatted_text_keeps_explicit_lines_out_of_the_soft_wrap_path() {
+        assert!(whitespace_soft_wraps(WhiteSpace::Normal));
+        assert!(!whitespace_soft_wraps(WhiteSpace::Nowrap));
+        assert!(!whitespace_soft_wraps(WhiteSpace::Pre));
     }
 }

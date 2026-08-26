@@ -112,6 +112,13 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Preserves explicit newlines and repeated spaces without soft wrapping.
+    /// [Docs](https://developer.mozilla.org/en-US/docs/Web/CSS/white-space)
+    fn whitespace_pre(mut self) -> Self {
+        self.text_style().white_space = Some(WhiteSpace::Pre);
+        self
+    }
+
     /// Sets the truncate overflowing text with an ellipsis (…) at the end if needed.
     /// [Docs](https://tailwindcss.com/docs/text-overflow#ellipsis)
     fn text_ellipsis(mut self) -> Self {
