@@ -2893,13 +2893,23 @@ impl Window {
 
     /// Releases any active pointer capture.
     pub fn release_pointer(&mut self) {
+        let had_capture = self.captured_hitbox.is_some() || self.captured_identity.is_some();
         self.captured_hitbox = None;
         self.captured_identity = None;
+        if had_capture {
+            self.refresh();
+        }
     }
 
     /// Returns the hitbox that has captured the pointer, if any.
     pub fn captured_hitbox(&self) -> Option<HitboxId> {
         self.captured_hitbox
+    }
+
+    pub(crate) fn captured_element_is_descendant_of(&self, ancestor: &GlobalElementId) -> bool {
+        self.captured_identity
+            .as_ref()
+            .is_some_and(|captured| captured.0.starts_with(ancestor.0.as_ref()))
     }
 
     /// The current state of the keyboard's modifiers

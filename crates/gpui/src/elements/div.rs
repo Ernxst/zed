@@ -2474,7 +2474,12 @@ impl Interactivity {
                                             }
 
                                             if let Some(group) = self.group.clone() {
-                                                GroupHitboxes::push(group, hitbox.id, cx);
+                                                GroupHitboxes::push(
+                                                    group,
+                                                    hitbox.id,
+                                                    global_id.cloned(),
+                                                    cx,
+                                                );
                                             }
 
                                             if let Some(area) = self.window_control {
@@ -2773,7 +2778,7 @@ impl Interactivity {
         }
 
         if let Some(group_hover) = self.group_hover_style.as_ref() {
-            if let Some(group_hitbox_id) = GroupHitboxes::get(&group_hover.group, cx) {
+            if let Some(group_hitbox) = GroupHitboxes::get(&group_hover.group, cx) {
                 let hover_state = element_state
                     .as_ref()
                     .and_then(|element| element.hover_state.as_ref())
@@ -2781,7 +2786,7 @@ impl Interactivity {
                 let current_view = window.current_view();
 
                 window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
-                    let group_hovered = group_hitbox_is_hovered(group_hitbox_id, window);
+                    let group_hovered = group_hitbox_is_hovered(&group_hitbox, window);
                     let was_group_hovered = hover_state
                         .as_ref()
                         .is_some_and(|state| state.borrow().group);
@@ -3152,7 +3157,8 @@ impl Interactivity {
                 window.on_mouse_event(move |_: &MouseDownEvent, phase, window, _cx| {
                     if phase == DispatchPhase::Bubble && !window.default_prevented() {
                         let group_hovered = active_group_hitbox
-                            .is_some_and(|group_hitbox_id| group_hitbox_id.is_hovered(window));
+                            .as_ref()
+                            .is_some_and(|group_hitbox| group_hitbox.id.is_hovered(window));
                         let element_hovered = hitbox.is_hovered(window);
                         if group_hovered || element_hovered {
                             *active_state.borrow_mut() = ElementClickedState {
@@ -3206,10 +3212,10 @@ impl Interactivity {
             .and_then(|group_hover| GroupHitboxes::get(&group_hover.group, cx));
 
         if let Some(group_hitbox) = group_hitbox {
-            let was_hovered = group_hitbox_is_hovered(group_hitbox, window);
+            let was_hovered = group_hitbox_is_hovered(&group_hitbox, window);
             let current_view = window.current_view();
             window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
-                let hovered = group_hitbox_is_hovered(group_hitbox, window);
+                let hovered = group_hitbox_is_hovered(&group_hitbox, window);
                 if phase == DispatchPhase::Capture && hovered != was_hovered {
                     cx.notify(current_view);
                 }
@@ -3333,8 +3339,8 @@ impl Interactivity {
         if !cx.has_active_drag() {
             if let Some(group_hover) = self.group_hover_style.as_ref() {
                 let is_group_hovered =
-                    if let Some(group_hitbox_id) = GroupHitboxes::get(&group_hover.group, cx) {
-                        group_hitbox_is_hovered(group_hitbox_id, window)
+                    if let Some(group_hitbox) = GroupHitboxes::get(&group_hover.group, cx) {
+                        group_hitbox_is_hovered(&group_hitbox, window)
                     } else if let Some(element_state) = element_state.as_ref() {
                         element_state
                             .hover_state
@@ -3378,10 +3384,9 @@ impl Interactivity {
 
                 if can_drop {
                     for (state_type, group_drag_style) in &self.group_drag_over_styles {
-                        if let Some(group_hitbox_id) =
-                            GroupHitboxes::get(&group_drag_style.group, cx)
+                        if let Some(group_hitbox) = GroupHitboxes::get(&group_drag_style.group, cx)
                             && *state_type == drag.value.as_ref().type_id()
-                            && group_hitbox_id.is_hovered(window)
+                            && group_hitbox.id.is_hovered(window)
                         {
                             style.refine(&group_drag_style.style);
                         }
@@ -3867,20 +3872,30 @@ fn handle_tooltip_check_visible_and_update(
     active_tooltip.borrow().is_some()
 }
 
-#[derive(Default)]
-pub(crate) struct GroupHitboxes(HashMap<SharedString, SmallVec<[HitboxId; 1]>>);
+#[derive(Clone)]
+pub(crate) struct GroupHitbox {
+    id: HitboxId,
+    identity: Option<GlobalElementId>,
+}
 
-fn group_hitbox_is_hovered(hitbox_id: HitboxId, window: &Window) -> bool {
-    // Group hover is spatial: pointer capture changes the event target, not whether
-    // the pointer remains within the group's hit-test bounds. The scroll hit test
-    // also reaches a group behind an in-flow BlockMouseExceptScroll descendant.
-    !window.last_input_was_keyboard() && hitbox_id.should_handle_scroll(window)
+#[derive(Default)]
+pub(crate) struct GroupHitboxes(HashMap<SharedString, SmallVec<[GroupHitbox; 1]>>);
+
+fn group_hitbox_is_hovered(group_hitbox: &GroupHitbox, window: &Window) -> bool {
+    let pointer_is_inside =
+        !window.last_input_was_keyboard() && group_hitbox.id.should_handle_scroll(window);
+    let member_has_capture = group_hitbox
+        .identity
+        .as_ref()
+        .is_some_and(|identity| window.captured_element_is_descendant_of(identity));
+
+    pointer_is_inside || member_has_capture
 }
 
 impl Global for GroupHitboxes {}
 
 impl GroupHitboxes {
-    pub fn get(name: &SharedString, cx: &mut App) -> Option<HitboxId> {
+    pub fn get(name: &SharedString, cx: &mut App) -> Option<GroupHitbox> {
         cx.default_global::<Self>()
             .0
             .get(name)
@@ -3888,12 +3903,20 @@ impl GroupHitboxes {
             .cloned()
     }
 
-    pub fn push(name: SharedString, hitbox_id: HitboxId, cx: &mut App) {
+    pub fn push(
+        name: SharedString,
+        hitbox_id: HitboxId,
+        identity: Option<GlobalElementId>,
+        cx: &mut App,
+    ) {
         cx.default_global::<Self>()
             .0
             .entry(name)
             .or_default()
-            .push(hitbox_id);
+            .push(GroupHitbox {
+                id: hitbox_id,
+                identity,
+            });
     }
 
     pub fn pop(name: &SharedString, cx: &mut App) {
@@ -4399,7 +4422,8 @@ mod tests {
                 .mt(px(20.))
                 .size(px(100.))
                 .relative()
-                .group("capture-group");
+                .group("capture-group")
+                .id("capture-group");
             if self.capture_group {
                 group = group.capture_pointer();
             }
@@ -4466,11 +4490,17 @@ mod tests {
             MouseButton::Left,
             Modifiers::none(),
         );
+        assert_eq!(target_width.get(), px(20.));
+        cx.simulate_mouse_up(
+            point(px(150.), px(30.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
         assert_eq!(target_width.get(), px(10.));
     }
 
     #[gpui::test]
-    fn group_hover_clears_outside_while_the_group_has_capture(cx: &mut TestAppContext) {
+    fn group_hover_tracks_group_capture_until_release(cx: &mut TestAppContext) {
         let target_width = Rc::new(Cell::new(px(0.)));
         let (_view, cx) = cx.add_window_view({
             let target_width = target_width.clone();
@@ -4492,6 +4522,12 @@ mod tests {
             Modifiers::none(),
         );
         cx.simulate_mouse_move(
+            point(px(150.), px(30.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        assert_eq!(target_width.get(), px(20.));
+        cx.simulate_mouse_up(
             point(px(150.), px(30.)),
             MouseButton::Left,
             Modifiers::none(),
