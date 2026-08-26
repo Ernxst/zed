@@ -59,7 +59,7 @@ use gpui_util::ResultExt;
 use std::{
     collections::{BTreeMap, btree_map},
     ffi::c_void,
-    sync::{Mutex, MutexGuard, PoisonError},
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
 static REGISTRY: Mutex<Registry> = Mutex::new(Registry::new());
@@ -81,7 +81,11 @@ impl Registry {
 struct DisplayEntry {
     link: sys::DisplayLink,
     running: bool,
-    subscribers: Vec<(SubscriberId, DispatchRetained<DispatchSource>)>,
+    subscribers: Vec<(
+        SubscriberId,
+        DispatchRetained<DispatchSource>,
+        Option<Arc<dyn Fn(FrameRequest) + Send + Sync>>,
+    )>,
 }
 
 // SAFETY: Both fields wrapping raw pointers are refcounted handles to
@@ -127,8 +131,12 @@ unsafe extern "C" fn display_link_output_callback(
     let display_id = display_id as usize as CGDirectDisplayID;
     let registry = lock_registry();
     if let Some(entry) = registry.displays.get(&display_id) {
-        for (_, frame_requests) in &entry.subscribers {
-            frame_requests.merge_data(1);
+        for (_, frame_requests, observer) in &entry.subscribers {
+            if let Some(observer) = observer {
+                observer(FrameRequest(frame_requests.clone()));
+            } else {
+                frame_requests.merge_data(1);
+            }
         }
     }
     0
@@ -137,6 +145,7 @@ unsafe extern "C" fn display_link_output_callback(
 fn subscribe(
     display_id: CGDirectDisplayID,
     frame_requests: DispatchRetained<DispatchSource>,
+    observer: Option<Arc<dyn Fn(FrameRequest) + Send + Sync>>,
 ) -> Result<SubscriberId> {
     debug_assert_main_thread();
 
@@ -175,7 +184,9 @@ fn subscribe(
                 anyhow::bail!("display link registry entry vanished for display {display_id}");
             }
         };
-        entry.subscribers.push((subscriber_id, frame_requests));
+        entry
+            .subscribers
+            .push((subscriber_id, frame_requests, observer));
         let link_to_start = if entry.running {
             None
         } else {
@@ -192,7 +203,7 @@ fn subscribe(
             let mut registry = lock_registry();
             if let Some(entry) = registry.displays.get_mut(&display_id) {
                 entry.running = false;
-                entry.subscribers.retain(|(id, _)| *id != subscriber_id);
+                entry.subscribers.retain(|(id, _, _)| *id != subscriber_id);
             }
             return Err(error);
         }
@@ -209,7 +220,7 @@ fn unsubscribe(display_id: CGDirectDisplayID, subscriber_id: SubscriberId) {
         let Some(entry) = registry.displays.get_mut(&display_id) else {
             return;
         };
-        entry.subscribers.retain(|(id, _)| *id != subscriber_id);
+        entry.subscribers.retain(|(id, _, _)| *id != subscriber_id);
         if entry.subscribers.is_empty() && entry.running {
             entry.running = false;
             Some(entry.link.clone())
@@ -225,16 +236,33 @@ fn unsubscribe(display_id: CGDirectDisplayID, subscriber_id: SubscriberId) {
     }
 }
 
+/// A display-link frame request that an embedded host can enqueue immediately
+/// before pumping the platform main loop.
+#[derive(Clone)]
+pub struct FrameRequest(DispatchRetained<DispatchSource>);
+
+impl FrameRequest {
+    /// Enqueues this frame request on the platform main queue.
+    pub fn dispatch(self) {
+        self.0.merge_data(1);
+    }
+}
+
 /// A per-window source of frame requests, paced by the display the window is
 /// on. The wrapped dispatch source coalesces vsync ticks from the display's
 /// io thread and invokes `callback(data)` on the main queue.
 pub struct WindowFrameSource {
     frame_requests: DispatchRetained<DispatchSource>,
+    observer: Option<Arc<dyn Fn(FrameRequest) + Send + Sync>>,
     registration: Option<(CGDirectDisplayID, SubscriberId)>,
 }
 
 impl WindowFrameSource {
-    pub fn new(data: *mut c_void, callback: extern "C" fn(*mut c_void)) -> Self {
+    pub fn new(
+        data: *mut c_void,
+        callback: extern "C" fn(*mut c_void),
+        observer: Option<Arc<dyn Fn(FrameRequest) + Send + Sync>>,
+    ) -> Self {
         let frame_requests = unsafe {
             let frame_requests = DispatchSource::new(
                 &raw const _dispatch_source_type_data_add as *mut _,
@@ -251,13 +279,18 @@ impl WindowFrameSource {
         };
         Self {
             frame_requests,
+            observer,
             registration: None,
         }
     }
 
     pub fn start(&mut self, display_id: CGDirectDisplayID) -> Result<()> {
         self.stop();
-        let subscriber_id = subscribe(display_id, self.frame_requests.clone())?;
+        let subscriber_id = subscribe(
+            display_id,
+            self.frame_requests.clone(),
+            self.observer.clone(),
+        )?;
         self.registration = Some((display_id, subscriber_id));
         Ok(())
     }

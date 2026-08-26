@@ -213,6 +213,7 @@ pub(crate) struct MacPlatformState {
     keyboard_mapper: Rc<MacKeyboardMapper>,
     /// Mirrors `[NSCursor setHiddenUntilMouseMoves:]` state, which AppKit doesn't expose.
     cursor_visible: Arc<AtomicBool>,
+    embedded_frame_request_callback: Option<Arc<dyn Fn(crate::FrameRequest) + Send + Sync>>,
     system_notifications: crate::system_notifications::SystemNotificationState,
 }
 
@@ -262,6 +263,7 @@ impl MacPlatform {
             menus: None,
             keyboard_mapper,
             cursor_visible: Arc::new(AtomicBool::new(true)),
+            embedded_frame_request_callback: None,
             system_notifications: crate::system_notifications::SystemNotificationState::new(),
         }))
     }
@@ -275,6 +277,26 @@ impl MacPlatform {
         let platform = Self::new(false);
         platform.0.lock().mode = MacPlatformMode::Embedded(EmbeddedLifecycle::Ready);
         platform
+    }
+
+    /// Registers an observer for display-link frame requests in embedded mode.
+    ///
+    /// Call this before [`Platform::run`]. The observer runs on the display-link
+    /// thread with a frame token, allowing a foreign main loop to schedule one
+    /// event pump without using a timer as its frame clock. The host must
+    /// dispatch the token immediately before that pump. The callback itself
+    /// must return without blocking.
+    pub fn on_request_frame(&self, callback: impl Fn(crate::FrameRequest) + Send + Sync + 'static) {
+        assert_main_thread("MacPlatform::on_request_frame");
+        let mut state = self.0.lock();
+        assert!(
+            matches!(
+                state.mode,
+                MacPlatformMode::Embedded(EmbeddedLifecycle::Ready)
+            ),
+            "on_request_frame must be called before the embedded platform starts"
+        );
+        state.embedded_frame_request_callback = Some(Arc::new(callback));
     }
 
     /// Processes pending AppKit work without waiting for new events.
@@ -930,13 +952,20 @@ impl Platform for MacPlatform {
             return Err(PopupNotSupportedError.into());
         }
 
-        let (cursor_visible, foreground_executor, background_executor, renderer_context) = {
+        let (
+            cursor_visible,
+            foreground_executor,
+            background_executor,
+            renderer_context,
+            frame_request_callback,
+        ) = {
             let guard = self.0.lock();
             (
                 guard.cursor_visible.clone(),
                 guard.foreground_executor.clone(),
                 guard.background_executor.clone(),
                 guard.renderer_context.clone(),
+                guard.embedded_frame_request_callback.clone(),
             )
         };
 
@@ -948,6 +977,7 @@ impl Platform for MacPlatform {
             foreground_executor,
             background_executor,
             renderer_context,
+            frame_request_callback,
         )))
     }
 
@@ -976,6 +1006,7 @@ impl Platform for MacPlatform {
             foreground_executor,
             background_executor,
             renderer_context,
+            None,
         )))
     }
 

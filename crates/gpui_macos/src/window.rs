@@ -632,6 +632,7 @@ struct MacWindowState {
     cursor_visible: Arc<AtomicBool>,
     frame_source: Option<WindowFrameSource>,
     renderer: renderer::Renderer,
+    request_frame_observer: Option<Arc<dyn Fn(crate::FrameRequest) + Send + Sync>>,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
     activate_callback: Option<Box<dyn FnMut(bool)>>,
@@ -807,8 +808,9 @@ impl MacWindowState {
             return;
         };
         let data = self.native_view.as_ptr() as *mut c_void;
+        let observer = self.request_frame_observer.clone();
         self.frame_source
-            .get_or_insert_with(|| WindowFrameSource::new(data, step))
+            .get_or_insert_with(|| WindowFrameSource::new(data, step, observer))
             .start(display_id)
             .log_err();
     }
@@ -938,6 +940,7 @@ impl MacWindow {
         foreground_executor: ForegroundExecutor,
         background_executor: BackgroundExecutor,
         renderer_context: renderer::Context,
+        request_frame_observer: Option<Arc<dyn Fn(crate::FrameRequest) + Send + Sync>>,
     ) -> Self {
         unsafe {
             let _pool = AutoreleasePoolGuard::new();
@@ -1081,6 +1084,7 @@ impl MacWindow {
                     bounds.size.map(|pixels| pixels.as_f32()),
                     false,
                 ),
+                request_frame_observer,
                 request_frame_callback: None,
                 event_callback: None,
                 activate_callback: None,

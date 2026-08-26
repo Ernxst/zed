@@ -47,7 +47,8 @@ use std::{
 
 pub(crate) use dispatcher::*;
 pub(crate) use display::*;
-pub(crate) use display_link::*;
+pub use display_link::FrameRequest;
+pub(crate) use display_link::WindowFrameSource;
 pub(crate) use keyboard::*;
 pub(crate) use platform::*;
 pub(crate) use window::*;
