@@ -27,7 +27,7 @@ use core_foundation::{
     runloop::{
         CFRunLoopActivity, CFRunLoopAddObserver, CFRunLoopGetMain, CFRunLoopObserverContext,
         CFRunLoopObserverCreate, CFRunLoopObserverRef, CFRunLoopRemoveObserver, CFRunLoopRun,
-        kCFRunLoopAfterWaiting, kCFRunLoopCommonModes,
+        kCFRunLoopBeforeWaiting, kCFRunLoopCommonModes,
     },
     string::{CFString, CFStringRef},
 };
@@ -653,7 +653,8 @@ fn assert_main_thread(operation: &str) {
 
 unsafe fn run_app_through_wake() {
     // GPUI frame ticks use a main-queue source, which only runs after the run loop wakes.
-    // Pre-posting an event makes that wake non-blocking; stopping before it starves frames.
+    // Pre-posting an event makes the pump non-blocking. Stop when that work drains and
+    // the run loop is about to wait, whether or not this iteration actually slept.
     extern "C" fn observe_run_loop(_: CFRunLoopObserverRef, _: CFRunLoopActivity, _: *mut c_void) {
         unsafe { stop_app_immediately() };
     }
@@ -669,7 +670,7 @@ unsafe fn run_app_through_wake() {
         };
         let observer = CFRunLoopObserverCreate(
             ptr::null(),
-            kCFRunLoopAfterWaiting,
+            kCFRunLoopBeforeWaiting,
             0,
             CFIndex::MIN,
             observe_run_loop,
