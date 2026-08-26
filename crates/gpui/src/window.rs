@@ -1728,18 +1728,7 @@ impl Window {
             move |active| {
                 handle
                     .update(&mut cx, |_, window, cx| {
-                        window.active.set(active);
-                        window.modifiers = window.platform_window.modifiers();
-                        window.capslock = window.platform_window.capslock();
-                        window
-                            .activation_observers
-                            .clone()
-                            .retain(&(), |callback| callback(window, cx));
-
-                        window.bounds_changed(cx);
-                        window.refresh();
-
-                        SystemWindowTabController::update_last_active(cx, window.handle.id);
+                        window.active_status_changed(active, cx);
                     })
                     .log_err();
             }
@@ -1954,6 +1943,27 @@ impl ContentMask<Pixels> {
 }
 
 impl Window {
+    fn active_status_changed(&mut self, active: bool, cx: &mut App) {
+        self.active.set(active);
+        self.modifiers = self.platform_window.modifiers();
+        self.capslock = self.platform_window.capslock();
+        self.activation_observers
+            .clone()
+            .retain(&(), |callback| callback(self, cx));
+
+        self.bounds_changed(cx);
+        self.refresh();
+
+        SystemWindowTabController::update_last_active(cx, self.handle.id);
+    }
+
+    /// Simulates a platform window activation change through the production
+    /// observer path.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn simulate_active_status_change(&mut self, active: bool, cx: &mut App) {
+        self.active_status_changed(active, cx);
+    }
+
     fn mark_view_dirty(&mut self, view_id: EntityId) {
         // Mark ancestor views as dirty. If already in the `dirty_views` set, then all its ancestors
         // should already be dirty.
