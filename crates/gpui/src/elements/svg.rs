@@ -137,7 +137,7 @@ impl Element for Svg {
             hitbox.as_ref(),
             window,
             cx,
-            |style, window, cx| {
+            |_style, window, cx| {
                 let transformation = self
                     .transformation
                     .as_ref()
@@ -145,23 +145,20 @@ impl Element for Svg {
                         transformation.into_matrix(bounds.center(), window.scale_factor())
                     })
                     .unwrap_or_default();
+                let color = window.text_style().color;
 
                 if let Some((data, path)) = self.data.as_ref().zip(self.data_path.as_ref()) {
-                    if let Some(color) = style.text.color {
-                        window
-                            .paint_svg(
-                                bounds,
-                                path.clone(),
-                                Some(&**data),
-                                transformation,
-                                color,
-                                cx,
-                            )
-                            .log_err();
-                    }
-                } else if let Some((path, color)) =
-                    self.external_path.as_ref().zip(style.text.color)
-                {
+                    window
+                        .paint_svg(
+                            bounds,
+                            path.clone(),
+                            Some(&**data),
+                            transformation,
+                            color,
+                            cx,
+                        )
+                        .log_err();
+                } else if let Some(path) = self.external_path.as_ref() {
                     let Some(bytes) = window
                         .use_asset::<SvgAsset>(path, cx)
                         .and_then(|asset| asset.log_err())
@@ -179,7 +176,7 @@ impl Element for Svg {
                             cx,
                         )
                         .log_err();
-                } else if let Some((path, color)) = self.path.as_ref().zip(style.text.color) {
+                } else if let Some(path) = self.path.as_ref() {
                     window
                         .paint_svg(bounds, path.clone(), None, transformation, color, cx)
                         .log_err();
