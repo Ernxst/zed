@@ -1,6 +1,7 @@
 use crate::{
-    AbsoluteLength, App, Bounds, DefiniteLength, Edges, GridTemplate, GridTemplateComponent,
-    GridTrack, GridTrackMax, GridTrackMin, Length, Pixels, Point, Size, Style, Window, size,
+    AbsoluteLength, App, Bounds, CalcLength, DefiniteLength, Edges, GridTemplate,
+    GridTemplateComponent, GridTrack, GridTrackMax, GridTrackMin, Length, Pixels, Point, Size,
+    Style, Window, size,
     util::{
         ceil_to_device_pixel, round_half_toward_zero, round_stroke_to_device_pixel,
         round_to_device_pixel,
@@ -49,6 +50,9 @@ enum NodeContext {
 
 struct LayoutNode {
     style: taffy::style::Style,
+    // Taffy's calc encoding retains an aligned pointer. These Arcs keep the
+    // expressions alive for the whole layout pass that dereferences it.
+    calc_lengths: Vec<CalcLength>,
     children: Vec<NodeId>,
     parent: Option<NodeId>,
     context: Option<NodeContext>,
@@ -75,12 +79,14 @@ impl GpuiTaffyTree {
     fn new_node(
         &mut self,
         style: taffy::style::Style,
+        calc_lengths: Vec<CalcLength>,
         children: &[LayoutId],
         context: Option<NodeContext>,
     ) -> LayoutId {
         let id = NodeId::from(self.nodes.len() as u64);
         self.nodes.push(LayoutNode {
             style,
+            calc_lengths,
             children: children.iter().map(|child| child.0).collect(),
             parent: None,
             context,
@@ -269,6 +275,20 @@ impl LayoutPartialTree for LayoutRun<'_> {
         self.tree.style(node_id)
     }
 
+    fn resolve_calc_value(&self, val: *const (), basis: f32) -> f32 {
+        // The only pointers handed to Taffy come from CalcLength::as_ptr and
+        // are retained by LayoutNode::calc_lengths for this layout run.
+        self.tree
+            .nodes
+            .iter()
+            .flat_map(|node| node.calc_lengths.iter())
+            .find(|length| length.as_ptr() == val)
+            // Every current caller builds expressions from pixels. Use the
+            // default rem only for GPUI callers that opt into rem expressions
+            // before the layout engine has a per-node rem metric.
+            .map_or(0.0, |length| length.resolve(basis, crate::px(16.0)))
+    }
+
     fn set_unrounded_layout(&mut self, node_id: NodeId, layout: &Layout) {
         self.tree.node_mut(node_id).layout = *layout;
     }
@@ -276,6 +296,38 @@ impl LayoutPartialTree for LayoutRun<'_> {
     fn compute_child_layout(&mut self, node_id: NodeId, inputs: LayoutInput) -> LayoutOutput {
         self.compute_node_layout(node_id, inputs, None)
     }
+}
+
+fn calc_lengths(style: &Style) -> Vec<CalcLength> {
+    fn length(value: &Length, values: &mut Vec<CalcLength>) {
+        match value {
+            Length::Definite(_) => {}
+            Length::Calc(value) => values.push(value.clone()),
+            Length::Auto => {}
+        }
+    }
+
+    let mut values = Vec::new();
+    for value in [
+        &style.inset.top,
+        &style.inset.right,
+        &style.inset.bottom,
+        &style.inset.left,
+        &style.size.width,
+        &style.size.height,
+        &style.min_size.width,
+        &style.min_size.height,
+        &style.max_size.width,
+        &style.max_size.height,
+        &style.margin.top,
+        &style.margin.right,
+        &style.margin.bottom,
+        &style.margin.left,
+        &style.flex_basis,
+    ] {
+        length(value, &mut values);
+    }
+    values
 }
 
 impl LayoutFlexboxContainer for LayoutRun<'_> {
@@ -378,9 +430,10 @@ impl TaffyLayoutEngine {
         scale_factor: f32,
         children: &[LayoutId],
     ) -> LayoutId {
+        let calc_lengths = calc_lengths(&style);
         let taffy_style = style.to_taffy(rem_size, scale_factor);
 
-        self.taffy.new_node(taffy_style, children, None)
+        self.taffy.new_node(taffy_style, calc_lengths, children, None)
     }
 
     pub fn request_measured_layout(
@@ -417,6 +470,7 @@ impl TaffyLayoutEngine {
         ) -> (Size<Pixels>, Option<Pixels>)
         + 'static,
     ) -> LayoutId {
+        let calc_lengths = calc_lengths(&style);
         let taffy_style = style.to_taffy(rem_size, scale_factor);
         let measure = Box::new(move |known, available, window: &mut Window, cx: &mut App| {
             let (size, first_baseline) = measure(known, available, window, cx);
@@ -437,7 +491,7 @@ impl TaffyLayoutEngine {
         let measure = StackSafe::new(measure);
 
         self.taffy
-            .new_node(taffy_style, &[], Some(NodeContext::Dynamic(measure)))
+            .new_node(taffy_style, calc_lengths, &[], Some(NodeContext::Dynamic(measure)))
     }
 
     /// Treats any `auto` dimension of the given node's style as filling `size`.
@@ -850,6 +904,7 @@ impl ToTaffy<taffy::style::LengthPercentageAuto> for Length {
     ) -> taffy::prelude::LengthPercentageAuto {
         match self {
             Length::Definite(length) => length.to_taffy(rem_size, scale_factor),
+            Length::Calc(length) => taffy::prelude::LengthPercentageAuto::calc(length.as_ptr()),
             Length::Auto => taffy::prelude::LengthPercentageAuto::auto(),
         }
     }
@@ -859,6 +914,7 @@ impl ToTaffy<taffy::style::Dimension> for Length {
     fn to_taffy(&self, rem_size: Pixels, scale_factor: f32) -> taffy::prelude::Dimension {
         match self {
             Length::Definite(length) => length.to_taffy(rem_size, scale_factor),
+            Length::Calc(length) => taffy::prelude::Dimension::calc(length.as_ptr()),
             Length::Auto => taffy::prelude::Dimension::auto(),
         }
     }
@@ -1074,6 +1130,7 @@ mod tests {
         style.size.width = length(width);
         tree.new_node(
             style,
+            Vec::new(),
             &[],
             Some(NodeContext::Fixed(MeasuredLayout {
                 size: size(Pixels(width), Pixels(height)),
@@ -1095,6 +1152,7 @@ mod tests {
         };
         tree.new_node(
             style,
+            Vec::new(),
             &[],
             Some(NodeContext::Fixed(MeasuredLayout {
                 size: size(Pixels(width), Pixels(height)),
@@ -1115,7 +1173,7 @@ mod tests {
             ..Default::default()
         };
         configure(&mut style);
-        tree.new_node(style, children, None)
+        tree.new_node(style, Vec::new(), children, None)
     }
 
     fn compute_test_layout_at_scale(tree: &mut GpuiTaffyTree, root: LayoutId, scale_factor: f32) {
@@ -1266,6 +1324,7 @@ mod tests {
                 display: Display::Block,
                 ..Default::default()
             },
+            Vec::new(),
             &[first_block_child, second_block_child],
             None,
         );
@@ -1281,6 +1340,7 @@ mod tests {
                 grid_template_columns: vec![length(20.), length(20.)],
                 ..Default::default()
             },
+            Vec::new(),
             &[first_grid_child, second_grid_child],
             None,
         );

@@ -8,7 +8,7 @@ use derive_more::{Add, AddAssign, Div, DivAssign, Mul, Neg, Sub, SubAssign};
 use refineable::Refineable;
 use schemars::{JsonSchema, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
-use std::borrow::Cow;
+use std::{borrow::Cow, sync::Arc};
 use std::ops::{AddAssign, Range};
 use std::{
     cmp::{self, PartialOrd},
@@ -3464,6 +3464,81 @@ pub enum DefiniteLength {
     Fraction(f32),
 }
 
+/// A layout expression whose percentage terms are resolved by Taffy with the
+/// containing block's size.
+#[derive(Clone, PartialEq)]
+pub struct CalcLength(Arc<CalcLengthExpr>);
+
+#[derive(Clone, PartialEq)]
+enum CalcLengthExpr {
+    Absolute(AbsoluteLength),
+    Fraction(f32),
+    Add(CalcLength, CalcLength),
+    Subtract(CalcLength, CalcLength),
+    Clamp(CalcLength, CalcLength, CalcLength),
+}
+
+impl CalcLength {
+    /// Creates an expression from an absolute length.
+    pub fn absolute(length: impl Into<AbsoluteLength>) -> Self {
+        Self(Arc::new(CalcLengthExpr::Absolute(length.into())))
+    }
+
+    /// Creates an expression from a fraction of the containing block.
+    pub fn relative(fraction: f32) -> Self {
+        Self(Arc::new(CalcLengthExpr::Fraction(fraction)))
+    }
+
+    /// Adds two layout expressions.
+    pub fn add(left: Self, right: Self) -> Self {
+        Self(Arc::new(CalcLengthExpr::Add(left, right)))
+    }
+
+    /// Subtracts the right expression from the left expression.
+    pub fn subtract(left: Self, right: Self) -> Self {
+        Self(Arc::new(CalcLengthExpr::Subtract(left, right)))
+    }
+
+    /// Clamps a preferred expression between a minimum and maximum expression.
+    pub fn clamp(min: Self, preferred: Self, max: Self) -> Self {
+        Self(Arc::new(CalcLengthExpr::Clamp(min, preferred, max)))
+    }
+
+    pub(crate) fn as_ptr(&self) -> *const () {
+        Arc::as_ptr(&self.0).cast()
+    }
+
+    pub(crate) fn resolve(&self, basis: f32, rem_size: Pixels) -> f32 {
+        match self.0.as_ref() {
+            CalcLengthExpr::Absolute(length) => length.to_pixels(rem_size).0,
+            CalcLengthExpr::Fraction(fraction) => basis * fraction,
+            CalcLengthExpr::Add(left, right) => {
+                left.resolve(basis, rem_size) + right.resolve(basis, rem_size)
+            }
+            CalcLengthExpr::Subtract(left, right) => {
+                left.resolve(basis, rem_size) - right.resolve(basis, rem_size)
+            }
+            CalcLengthExpr::Clamp(min, preferred, max) => preferred
+                .resolve(basis, rem_size)
+                .clamp(min.resolve(basis, rem_size), max.resolve(basis, rem_size)),
+        }
+    }
+}
+
+impl Debug for CalcLength {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("calc(..)")
+    }
+}
+
+impl Neg for CalcLength {
+    type Output = Self;
+
+    fn neg(self) -> Self::Output {
+        Self::subtract(Self::absolute(px(0.0)), self)
+    }
+}
+
 impl DefiniteLength {
     /// Converts the `DefiniteLength` to `Pixels` based on a given `base_size` and `rem_size`.
     ///
@@ -3607,10 +3682,12 @@ impl Default for DefiniteLength {
 }
 
 /// A length that can be defined in pixels, rems, percent of parent, or auto.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum Length {
     /// A definite length specified either in pixels, rems, or as a fraction of the parent's size.
     Definite(DefiniteLength),
+    /// A deferred expression resolved by Taffy against the containing block.
+    Calc(CalcLength),
     /// An automatic length that is determined by the context in which it is used.
     Auto,
 }
@@ -3625,6 +3702,7 @@ impl Display for Length {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Length::Definite(definite_length) => write!(f, "{}", definite_length),
+            Length::Calc(length) => Debug::fmt(length, f),
             Length::Auto => write!(f, "auto"),
         }
     }
@@ -3767,6 +3845,12 @@ impl From<Rems> for Length {
 impl From<DefiniteLength> for Length {
     fn from(length: DefiniteLength) -> Self {
         Self::Definite(length)
+    }
+}
+
+impl From<CalcLength> for Length {
+    fn from(length: CalcLength) -> Self {
+        Self::Calc(length)
     }
 }
 
@@ -3930,6 +4014,7 @@ impl IsZero for Length {
     fn is_zero(&self) -> bool {
         match self {
             Length::Definite(length) => length.is_zero(),
+            Length::Calc(_) => false,
             Length::Auto => false,
         }
     }
