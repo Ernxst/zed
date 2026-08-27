@@ -576,7 +576,26 @@ impl Platform for WindowsPlatform {
         handle: AnyWindowHandle,
         options: WindowParams,
     ) -> Result<Box<dyn PlatformWindow>> {
-        let window = WindowsWindow::new(handle, options, self.generate_creation_info())?;
+        let window = WindowsWindow::new(handle, options, self.generate_creation_info(), None)?;
+        let handle = window.get_raw_handle();
+        self.raw_window_handles.write().push(handle.into());
+
+        Ok(Box::new(window))
+    }
+
+    #[cfg(feature = "test-support")]
+    fn open_window_for_visual_test(
+        &self,
+        handle: AnyWindowHandle,
+        options: WindowParams,
+        display: Rc<dyn PlatformDisplay>,
+    ) -> Result<Box<dyn PlatformWindow>> {
+        let window = WindowsWindow::new(
+            handle,
+            options,
+            self.generate_creation_info(),
+            Some(display.bounds()),
+        )?;
         let handle = window.get_raw_handle();
         self.raw_window_handles.write().push(handle.into());
 

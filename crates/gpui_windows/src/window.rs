@@ -418,6 +418,7 @@ impl WindowsWindow {
         handle: AnyWindowHandle,
         params: WindowParams,
         creation_info: WindowCreationInfo,
+        virtual_display_bounds: Option<Bounds<Pixels>>,
     ) -> Result<Self> {
         // Native popups are not implemented on Windows yet. Rejecting lets callers fall back to
         // gpui's in-window popovers.
@@ -552,8 +553,13 @@ impl WindowsWindow {
         set_non_rude_hwnd(hwnd, true);
         configure_dwm_dark_mode(hwnd, appearance);
         this.state.border_offset.update(hwnd)?;
-        let placement =
-            retrieve_window_placement(hwnd, display, params.bounds, &this.state.border_offset)?;
+        let placement = retrieve_window_placement(
+            hwnd,
+            display,
+            params.bounds,
+            &this.state.border_offset,
+            virtual_display_bounds,
+        )?;
         if params.show {
             let mut placement = placement;
             if !params.focus {
@@ -1522,14 +1528,16 @@ fn retrieve_window_placement(
     display: WindowsDisplay,
     initial_bounds: Bounds<Pixels>,
     border_offset: &WindowBorderOffset,
+    virtual_display_bounds: Option<Bounds<Pixels>>,
 ) -> Result<WINDOWPLACEMENT> {
     let mut placement = WINDOWPLACEMENT {
         length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
         ..Default::default()
     };
     unsafe { GetWindowPlacement(hwnd, &mut placement)? };
-    // the bounds may be not inside the display
-    let bounds = if display.check_given_bounds(initial_bounds) {
+    // Visual tests deliberately place windows outside host displays. Their virtual
+    // display owns the requested bounds, so do not replace them with the host size.
+    let bounds = if virtual_display_bounds.is_some() || display.check_given_bounds(initial_bounds) {
         initial_bounds
     } else {
         display.default_bounds()
