@@ -522,6 +522,11 @@ pub struct ScrollWheelEvent {
 
     /// The phase of the touch event.
     pub touch_phase: TouchPhase,
+
+    /// The phase of momentum generated after a touch scroll ends.
+    ///
+    /// Platforms without a distinct momentum stream leave this as `None`.
+    pub momentum_phase: Option<TouchPhase>,
 }
 
 impl Sealed for ScrollWheelEvent {}

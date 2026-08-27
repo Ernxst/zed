@@ -10,8 +10,8 @@
 use crate::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, DispatchPhase, Edges, Element, EntityId,
     FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
-    Overflow, Pixels, Point, ScrollDelta, ScrollWheelEvent, Size, Style, StyleRefinement, Styled,
-    Window, point, px, size,
+    Overflow, Pixels, Point, ScrollWheelEvent, Size, Style, StyleRefinement, Styled, Window, point,
+    px, size,
 };
 use collections::VecDeque;
 use refineable::Refineable as _;
@@ -897,50 +897,63 @@ impl StateInner {
 
     fn scroll(
         &mut self,
-        scroll_top: &ListOffset,
+        scroll_top: &mut ListOffset,
         height: Pixels,
         delta: Point<Pixels>,
         current_view: EntityId,
         window: &mut Window,
         cx: &mut App,
-    ) {
+    ) -> Point<Pixels> {
         // Drop scroll events after a reset, since we can't calculate
         // the new logical scroll top without the item heights
         if self.reset {
-            return;
+            return Point::default();
         }
 
         let padding = self.last_padding.unwrap_or_default();
         let scroll_max =
             (self.items.summary().height + padding.top + padding.bottom - height).max(px(0.));
-        let new_scroll_top = (self.scroll_top(scroll_top) - delta.y)
+        let previous_scroll_top = self.scroll_top(scroll_top);
+        let new_scroll_top = (previous_scroll_top - delta.y)
             .max(px(0.))
             .min(scroll_max);
-
-        if self.alignment == ListAlignment::Bottom && new_scroll_top == scroll_max {
-            self.pending_scroll = None;
-            self.logical_scroll_top = None;
-        } else {
-            let (start, ..) =
-                self.items
-                    .find::<ListItemSummary, _>((), &Height(new_scroll_top), Bias::Right);
-            let scroll_top = ListOffset {
-                item_ix: start.count,
-                offset_in_item: new_scroll_top - start.height,
-            };
-            // The user's scroll supersedes the position stashed by a
-            // remeasure; re-anchor the pending adjustment so it doesn't revert
-            // this scroll on the next layout.
-            self.rebase_pending_scroll(scroll_top);
-            self.logical_scroll_top = Some(scroll_top);
-        }
-
+        let did_scroll = new_scroll_top != previous_scroll_top;
+        let was_following = self.follow_state.is_following();
         if delta.y > px(0.) {
             self.follow_state.stop_following();
         }
+        let follow_state_changed = was_following && !self.follow_state.is_following();
 
+        if did_scroll {
+            if self.alignment == ListAlignment::Bottom && new_scroll_top == scroll_max {
+                self.pending_scroll = None;
+                self.logical_scroll_top = None;
+            } else {
+                let (start, ..) =
+                    self.items
+                        .find::<ListItemSummary, _>((), &Height(new_scroll_top), Bias::Right);
+                let scroll_top = ListOffset {
+                    item_ix: start.count,
+                    offset_in_item: new_scroll_top - start.height,
+                };
+                // The user's scroll supersedes the position stashed by a
+                // remeasure; re-anchor the pending adjustment so it doesn't revert
+                // this scroll on the next layout.
+                self.rebase_pending_scroll(scroll_top);
+                self.logical_scroll_top = Some(scroll_top);
+            }
+        }
+
+        if !did_scroll && !follow_state_changed {
+            return Point::default();
+        }
+        *scroll_top = self.logical_scroll_top();
+
+        let consumed = point(Pixels::ZERO, previous_scroll_top - new_scroll_top);
+
+        let visible_scroll_top = self.logical_scroll_top();
+        let visible_range = Self::visible_range(&self.items, height, &visible_scroll_top);
         if let Some(handler) = self.scroll_handler.as_mut() {
-            let visible_range = Self::visible_range(&self.items, height, scroll_top);
             handler(
                 &ListScrollEvent {
                     visible_range,
@@ -957,6 +970,7 @@ impl StateInner {
         }
 
         cx.notify(current_view);
+        consumed
     }
 
     fn logical_scroll_top(&self) -> ListOffset {
@@ -1601,21 +1615,23 @@ impl Element for List {
         // div-based scroll containers.
         let list_state = self.state.clone();
         let height = bounds.size.height;
-        let scroll_top = prepaint.layout.scroll_top;
+        let mut scroll_top = prepaint.layout.scroll_top;
         let hitbox_id = prepaint.hitbox.id;
-        let mut accumulated_scroll_delta = ScrollDelta::default();
         window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
             if phase == DispatchPhase::Bubble && hitbox_id.should_handle_scroll(window) {
-                accumulated_scroll_delta = accumulated_scroll_delta.coalesce(event.delta);
-                let pixel_delta = accumulated_scroll_delta.pixel_delta(px(20.));
-                list_state.0.borrow_mut().scroll(
-                    &scroll_top,
+                let line_height = px(20.);
+                let pixel_delta = window
+                    .remaining_scroll_delta(event, event.delta.precise())
+                    .pixel_delta(line_height);
+                let consumed = list_state.0.borrow_mut().scroll(
+                    &mut scroll_top,
                     height,
                     pixel_delta,
                     current_view,
                     window,
                     cx,
-                )
+                );
+                window.consume_scroll_delta(consumed, line_height);
             }
         });
 
@@ -1737,7 +1753,8 @@ mod test {
 
     use crate::{
         self as gpui, AppContext, Bounds, Context, Element, FollowMode, InteractiveElement,
-        IntoElement, ListState, Render, Styled, TestAppContext, Window, canvas, div, list, point,
+        IntoElement, ListState, ParentElement as _, Render, ScrollHandle,
+        StatefulInteractiveElement as _, Styled, TestAppContext, Window, canvas, div, list, point,
         px, size,
     };
 
@@ -1934,6 +1951,67 @@ mod test {
         let offset = state.logical_scroll_top();
         assert_eq!(offset.item_ix, 0);
         assert_eq!(offset.offset_in_item, px(0.));
+    }
+
+    struct NestedListScrollTestView {
+        parent: ScrollHandle,
+        state: ListState,
+    }
+
+    impl Render for NestedListScrollTestView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("nested-list-parent")
+                .flex()
+                .flex_col()
+                .w(px(100.))
+                .h(px(200.))
+                .overflow_y_scroll()
+                .track_scroll(&self.parent)
+                .child(
+                    list(self.state.clone(), |_, _, _| {
+                        div().h(px(20.)).w_full().into_any()
+                    })
+                    .flex_none()
+                    .w_full()
+                    .h(px(100.)),
+                )
+                .child(div().flex_none().w_full().h(px(300.)))
+        }
+    }
+
+    #[gpui::test]
+    fn nested_scroll_list_consumes_range_and_routes_residual_to_parent(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let parent = ScrollHandle::new();
+        let state = ListState::new(20, crate::ListAlignment::Top, px(0.))
+            .with_uniform_item_height(px(20.));
+
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, cx| {
+            cx.new(|_| NestedListScrollTestView {
+                parent: parent.clone(),
+                state: state.clone(),
+            })
+            .into_any_element()
+        });
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(50.), px(50.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-350.))),
+            ..Default::default()
+        });
+
+        assert_eq!(state.scroll_px_offset_for_scrollbar().y, px(-300.));
+        assert_eq!(parent.offset().y, px(-50.));
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(50.), px(50.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(40.))),
+            ..Default::default()
+        });
+
+        assert_eq!(state.scroll_px_offset_for_scrollbar().y, px(-260.));
+        assert_eq!(parent.offset().y, px(-50.));
     }
 
     struct TestListView(ListState);

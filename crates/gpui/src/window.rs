@@ -6,18 +6,19 @@ use crate::Inspector;
 use crate::profiler;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AtlasTile, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow,
+    AsyncWindowContext, AtlasTile, AvailableSpace, Axis, Background, BorderStyle, Bounds, BoxShadow,
     Capslock, ClipNode, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
     DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
     EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
     Hsla, InputHandler, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent, KeyListener,
     Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
-    MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
+    MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, OngoingScroll, Path,
+    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
+    Point, PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
     RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
-    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
-    StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab,
+    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, ScrollDelta, ScrollWheelEvent,
+    Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite, SubscriberSet,
+    Subscription, SystemWindowTab,
     SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle,
     TextStyleRefinement, ThermalState, TransformationMatrix, Underline, UnderlineStyle,
     WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations,
@@ -738,6 +739,69 @@ pub(crate) struct HitTest {
     pub(crate) hover_hitbox_count: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ScrollDispatchState {
+    remaining: ScrollDelta,
+    axis_locked: bool,
+    axis: Option<Axis>,
+}
+
+impl ScrollDispatchState {
+    fn consume(&mut self, consumed: Point<Pixels>, line_height: Pixels) {
+        fn residual(remaining: Pixels, consumed: Pixels) -> Pixels {
+            if remaining.is_zero()
+                || consumed.is_zero()
+                || remaining.signum() != consumed.signum()
+            {
+                remaining
+            } else if consumed.abs() >= remaining.abs() {
+                Pixels::ZERO
+            } else {
+                remaining - consumed
+            }
+        }
+
+        let remaining = self.remaining.pixel_delta(line_height);
+        let remaining = point(
+            residual(remaining.x, consumed.x),
+            residual(remaining.y, consumed.y),
+        );
+        self.remaining = match self.remaining {
+            ScrollDelta::Pixels(_) => ScrollDelta::Pixels(remaining),
+            ScrollDelta::Lines(_) if !line_height.is_zero() => {
+                ScrollDelta::Lines(point(remaining.x / line_height, remaining.y / line_height))
+            }
+            ScrollDelta::Lines(_) => ScrollDelta::Lines(Point::default()),
+        };
+    }
+
+    fn remaining(&self) -> ScrollDelta {
+        if !self.axis_locked {
+            return self.remaining;
+        }
+
+        match (self.remaining, self.axis) {
+            (ScrollDelta::Pixels(mut delta), Some(Axis::Horizontal)) => {
+                delta.y = Pixels::ZERO;
+                ScrollDelta::Pixels(delta)
+            }
+            (ScrollDelta::Pixels(mut delta), Some(Axis::Vertical)) => {
+                delta.x = Pixels::ZERO;
+                ScrollDelta::Pixels(delta)
+            }
+            (ScrollDelta::Lines(mut delta), Some(Axis::Horizontal)) => {
+                delta.y = 0.;
+                ScrollDelta::Lines(delta)
+            }
+            (ScrollDelta::Lines(mut delta), Some(Axis::Vertical)) => {
+                delta.x = 0.;
+                ScrollDelta::Lines(delta)
+            }
+            (delta, None) => delta,
+        }
+    }
+}
+
 /// A type of window control area that corresponds to the platform window.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WindowControlArea {
@@ -1197,6 +1261,8 @@ pub struct Window {
     default_prevented: bool,
     mouse_position: Point<Pixels>,
     mouse_hit_test: HitTest,
+    scroll_dispatch_state: Option<ScrollDispatchState>,
+    ongoing_scroll: OngoingScroll,
     modifiers: Modifiers,
     capslock: Capslock,
     scale_factor: f32,
@@ -1881,6 +1947,8 @@ impl Window {
             default_prevented: true,
             mouse_position,
             mouse_hit_test: HitTest::default(),
+            scroll_dispatch_state: None,
+            ongoing_scroll: OngoingScroll::default(),
             modifiers,
             capslock,
             scale_factor,
@@ -5583,6 +5651,18 @@ impl Window {
             return;
         }
 
+        let previous_scroll_dispatch_state =
+            event.downcast_ref::<ScrollWheelEvent>().map(|event| {
+                mem::replace(
+                    &mut self.scroll_dispatch_state,
+                    Some(ScrollDispatchState {
+                        remaining: event.delta,
+                        axis_locked: false,
+                        axis: None,
+                    }),
+                )
+            });
+
         let mut mouse_listeners = mem::take(&mut self.rendered_frame.mouse_listeners);
 
         // Capture phase, events bubble from back to front. Handlers for this phase are used for
@@ -5608,6 +5688,10 @@ impl Window {
 
         self.rendered_frame.mouse_listeners = mouse_listeners;
 
+        if let Some(previous_scroll_dispatch_state) = previous_scroll_dispatch_state {
+            self.scroll_dispatch_state = previous_scroll_dispatch_state;
+        }
+
         if cx.has_active_drag() {
             if event.is::<MouseMoveEvent>() {
                 // If this was a mouse move event, redraw the window so that the
@@ -5624,6 +5708,61 @@ impl Window {
         // Auto-release pointer capture on mouse up
         if event.is::<MouseUpEvent>() && self.captured_hitbox.is_some() {
             self.release_pointer();
+        }
+    }
+
+    /// Returns the scroll delta not yet consumed by a deeper handler in the
+    /// current wheel-event dispatch.
+    ///
+    /// Scroll handlers run from the innermost hit element outward. A handler
+    /// must clamp this delta to its own remaining range, apply that movement,
+    /// and report the movement with [`Self::consume_scroll_delta`]. The next
+    /// handler then receives only the residual, in the event's original unit.
+    /// When `lock_axis` is true, every handler in this dispatch observes the
+    /// same gesture axis selected by [`OngoingScroll`].
+    pub fn remaining_scroll_delta(
+        &mut self,
+        event: &ScrollWheelEvent,
+        lock_axis: bool,
+    ) -> ScrollDelta {
+        let needs_axis = lock_axis
+            && self
+                .scroll_dispatch_state
+                .as_ref()
+                .is_some_and(|state| !state.axis_locked);
+        if needs_axis {
+            let mut delta = event.delta.pixel_delta(px(1.));
+            self.ongoing_scroll.filter_with_momentum(
+                &mut delta,
+                event.touch_phase,
+                event.momentum_phase,
+            );
+            let axis = self.ongoing_scroll.axis();
+            if let Some(state) = self.scroll_dispatch_state.as_mut() {
+                state.axis_locked = true;
+                state.axis = axis;
+            }
+        }
+
+        self.scroll_dispatch_state
+            .map_or(event.delta, |state| state.remaining())
+    }
+
+    pub(crate) fn scroll_axis_locked(&self) -> bool {
+        self.scroll_dispatch_state
+            .is_some_and(|state| state.axis_locked)
+    }
+
+    /// Reports the pixel delta actually applied by a scroll handler during the
+    /// current wheel-event dispatch.
+    ///
+    /// `consumed` must have the same sign as the delta returned by
+    /// [`Self::remaining_scroll_delta`]. `line_height` must be the conversion
+    /// used by that handler when the source event was line-based. Calling this
+    /// outside a wheel-event dispatch has no effect.
+    pub fn consume_scroll_delta(&mut self, consumed: Point<Pixels>, line_height: Pixels) {
+        if let Some(state) = self.scroll_dispatch_state.as_mut() {
+            state.consume(consumed, line_height);
         }
     }
 
@@ -7296,6 +7435,7 @@ pub fn outline(
 
 #[cfg(test)]
 mod tests {
+    use super::ScrollDispatchState;
     use std::{
         cell::{Cell, RefCell},
         path::PathBuf,
@@ -7310,6 +7450,42 @@ mod tests {
         StatefulInteractiveElement as _, Styled, TestAppContext, Window, WindowAppearance,
         WindowOptions, canvas, div, point, px, size,
     };
+
+    #[test]
+    fn scroll_dispatch_tracks_the_unconsumed_pixel_delta() {
+        let mut state = ScrollDispatchState {
+            remaining: crate::ScrollDelta::Pixels(point(px(0.), px(-100.))),
+            axis_locked: false,
+            axis: None,
+        };
+
+        state.consume(point(px(0.), px(-60.)), px(20.));
+        let crate::ScrollDelta::Pixels(remaining) = state.remaining else {
+            panic!("pixel input must keep pixel residuals");
+        };
+        assert_eq!(remaining, point(px(0.), px(-40.)));
+
+        state.consume(point(px(0.), px(-80.)), px(20.));
+        let crate::ScrollDelta::Pixels(remaining) = state.remaining else {
+            panic!("pixel input must keep pixel residuals");
+        };
+        assert_eq!(remaining, Point::default());
+    }
+
+    #[test]
+    fn scroll_dispatch_preserves_line_units_after_partial_consumption() {
+        let mut state = ScrollDispatchState {
+            remaining: crate::ScrollDelta::Lines(point(0., -5.)),
+            axis_locked: false,
+            axis: None,
+        };
+
+        state.consume(point(px(0.), px(-60.)), px(20.));
+        let crate::ScrollDelta::Lines(remaining) = state.remaining else {
+            panic!("line input must keep line residuals");
+        };
+        assert_eq!(remaining, point(0., -2.));
+    }
 
     struct EmptyView;
 

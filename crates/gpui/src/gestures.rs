@@ -23,6 +23,9 @@ const SCROLL_EVENT_SEPARATION: Duration = Duration::from_millis(28);
 pub struct OngoingScroll {
     last_event: Option<Instant>,
     axis: Option<Axis>,
+    touch_phase_active: bool,
+    momentum_active: bool,
+    momentum_axis: Option<Axis>,
 }
 
 impl OngoingScroll {
@@ -31,33 +34,94 @@ impl OngoingScroll {
     /// Gestures are delimited by their touch phase when available, with a timeout
     /// fallback for platforms that only emit [`TouchPhase::Moved`].
     pub fn filter(&mut self, delta: &mut Point<Pixels>, touch_phase: TouchPhase) {
-        self.filter_at(delta, touch_phase, Instant::now())
+        self.filter_with_momentum(delta, touch_phase, None)
     }
 
-    fn filter_at(&mut self, delta: &mut Point<Pixels>, touch_phase: TouchPhase, now: Instant) {
-        const UNLOCK_PERCENT: f32 = 1.9;
-        const UNLOCK_LOWER_BOUND: Pixels = px(6.);
+    /// Filters a scroll delta while preserving a momentum stream as the
+    /// continuation of the touch gesture that produced it.
+    pub fn filter_with_momentum(
+        &mut self,
+        delta: &mut Point<Pixels>,
+        touch_phase: TouchPhase,
+        momentum_phase: Option<TouchPhase>,
+    ) {
+        self.filter_with_momentum_at(delta, touch_phase, momentum_phase, Instant::now())
+    }
 
-        if matches!(touch_phase, TouchPhase::Ended | TouchPhase::Cancelled) {
-            self.last_event = None;
-            self.axis = None;
+    #[cfg(test)]
+    fn filter_at(&mut self, delta: &mut Point<Pixels>, touch_phase: TouchPhase, now: Instant) {
+        self.filter_with_momentum_at(delta, touch_phase, None, now)
+    }
+
+    fn filter_with_momentum_at(
+        &mut self,
+        delta: &mut Point<Pixels>,
+        touch_phase: TouchPhase,
+        momentum_phase: Option<TouchPhase>,
+        now: Instant,
+    ) {
+        const SWITCH_PERCENT: f32 = 1.9;
+        const SWITCH_LOWER_BOUND: Pixels = px(6.);
+
+        if touch_phase == TouchPhase::Cancelled
+            || matches!(
+                momentum_phase,
+                Some(TouchPhase::Ended | TouchPhase::Cancelled)
+            )
+        {
+            *self = Self::default();
             return;
         }
+
+        if touch_phase == TouchPhase::Ended && momentum_phase.is_none() {
+            self.touch_phase_active = false;
+            self.momentum_active = false;
+            self.momentum_axis = self.axis.take();
+            self.last_event = Some(now);
+            return;
+        }
+
+        let starts_new_gesture = if let Some(momentum_phase) = momentum_phase {
+            self.touch_phase_active = false;
+            match momentum_phase {
+                TouchPhase::Started => {
+                    self.momentum_active = true;
+                    self.axis = self.axis.or(self.momentum_axis.take());
+                    self.axis.is_none()
+                }
+                TouchPhase::Moved => {
+                    if !self.momentum_active {
+                        self.axis = self.axis.or(self.momentum_axis.take());
+                    }
+                    self.momentum_active = true;
+                    self.axis.is_none()
+                }
+                TouchPhase::Ended | TouchPhase::Cancelled => unreachable!(),
+            }
+        } else if touch_phase == TouchPhase::Started {
+            self.touch_phase_active = true;
+            self.momentum_active = false;
+            self.momentum_axis = None;
+            self.last_event = None;
+            self.axis = None;
+            true
+        } else if self.touch_phase_active {
+            self.axis.is_none()
+        } else {
+            self.momentum_active = false;
+            self.momentum_axis = None;
+            self.axis.is_none()
+                || self.last_event.is_none_or(|last_event| {
+                    now.duration_since(last_event) >= SCROLL_EVENT_SEPARATION
+                })
+        };
 
         let x = delta.x.abs();
         let y = delta.y.abs();
         if x.is_zero() && y.is_zero() {
-            if touch_phase == TouchPhase::Started {
-                self.last_event = None;
-                self.axis = None;
-            }
             return;
         }
 
-        let starts_new_gesture = touch_phase == TouchPhase::Started
-            || self
-                .last_event
-                .is_none_or(|last_event| now.duration_since(last_event) >= SCROLL_EVENT_SEPARATION);
         let mut axis = self.axis;
         if starts_new_gesture {
             axis = if x <= y {
@@ -65,13 +129,13 @@ impl OngoingScroll {
             } else {
                 Some(Axis::Horizontal)
             };
-        } else if x.max(y) >= UNLOCK_LOWER_BOUND {
+        } else if x.max(y) >= SWITCH_LOWER_BOUND {
             match axis {
-                Some(Axis::Vertical) if x > y && x >= y * UNLOCK_PERCENT => {
-                    axis = None;
+                Some(Axis::Vertical) if x > y && x >= y * SWITCH_PERCENT => {
+                    axis = Some(Axis::Horizontal);
                 }
-                Some(Axis::Horizontal) if y > x && y >= x * UNLOCK_PERCENT => {
-                    axis = None;
+                Some(Axis::Horizontal) if y > x && y >= x * SWITCH_PERCENT => {
+                    axis = Some(Axis::Vertical);
                 }
                 _ => {}
             }
@@ -84,6 +148,10 @@ impl OngoingScroll {
             Some(Axis::Horizontal) => delta.y = Pixels::ZERO,
             None => {}
         }
+    }
+
+    pub(crate) fn axis(&self) -> Option<Axis> {
+        self.axis
     }
 }
 
@@ -220,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn ongoing_scroll_unlocks_when_direction_changes() {
+    fn ongoing_scroll_switches_axis_when_direction_changes() {
         let now = Instant::now();
         let mut ongoing_scroll = OngoingScroll::default();
         let mut horizontal_delta = point(px(10.), px(2.));
@@ -232,8 +300,25 @@ mod tests {
             TouchPhase::Moved,
             now + Duration::from_millis(1),
         );
-        assert_eq!(ongoing_scroll.axis, None);
-        assert_eq!(vertical_delta, point(px(2.), px(10.)));
+        assert_eq!(ongoing_scroll.axis, Some(Axis::Vertical));
+        assert_eq!(vertical_delta, point(px(0.), px(10.)));
+    }
+
+    #[test]
+    fn ongoing_scroll_phased_stream_does_not_timeout() {
+        let now = Instant::now();
+        let mut ongoing_scroll = OngoingScroll::default();
+        let mut horizontal_delta = point(px(10.), px(2.));
+        ongoing_scroll.filter_at(&mut horizontal_delta, TouchPhase::Started, now);
+
+        let mut ambiguous_delta = point(px(7.), px(10.));
+        ongoing_scroll.filter_at(
+            &mut ambiguous_delta,
+            TouchPhase::Moved,
+            now + SCROLL_EVENT_SEPARATION,
+        );
+        assert_eq!(ongoing_scroll.axis, Some(Axis::Horizontal));
+        assert_eq!(ambiguous_delta, point(px(7.), px(0.)));
     }
 
     #[test]
@@ -303,6 +388,30 @@ mod tests {
     }
 
     #[test]
+    fn ongoing_scroll_zero_delta_started_resets_the_previous_axis() {
+        let now = Instant::now();
+        let mut ongoing_scroll = OngoingScroll::default();
+        let mut horizontal_delta = point(px(10.), px(2.));
+        ongoing_scroll.filter_at(&mut horizontal_delta, TouchPhase::Moved, now);
+
+        let mut zero_delta = Point::default();
+        ongoing_scroll.filter_at(
+            &mut zero_delta,
+            TouchPhase::Started,
+            now + Duration::from_millis(1),
+        );
+
+        let mut vertical_delta = point(px(7.), px(10.));
+        ongoing_scroll.filter_at(
+            &mut vertical_delta,
+            TouchPhase::Moved,
+            now + Duration::from_millis(2),
+        );
+        assert_eq!(ongoing_scroll.axis, Some(Axis::Vertical));
+        assert_eq!(vertical_delta, point(px(0.), px(10.)));
+    }
+
+    #[test]
     fn ongoing_scroll_supports_moved_only_platforms() {
         let now = Instant::now();
         let mut ongoing_scroll = OngoingScroll::default();
@@ -310,5 +419,39 @@ mod tests {
         ongoing_scroll.filter_at(&mut horizontal_delta, TouchPhase::Moved, now);
         assert_eq!(ongoing_scroll.axis, Some(Axis::Horizontal));
         assert_eq!(horizontal_delta, point(px(10.), px(0.)));
+    }
+
+    #[test]
+    fn ongoing_scroll_momentum_continues_the_touch_axis() {
+        let now = Instant::now();
+        let mut ongoing_scroll = OngoingScroll::default();
+        let mut horizontal_delta = point(px(10.), px(2.));
+        ongoing_scroll.filter_at(&mut horizontal_delta, TouchPhase::Started, now);
+
+        let mut zero_delta = Point::default();
+        ongoing_scroll.filter_at(
+            &mut zero_delta,
+            TouchPhase::Ended,
+            now + Duration::from_millis(1),
+        );
+        assert_eq!(ongoing_scroll.axis, None);
+
+        let mut momentum_delta = point(px(7.), px(10.));
+        ongoing_scroll.filter_with_momentum_at(
+            &mut momentum_delta,
+            TouchPhase::Moved,
+            Some(TouchPhase::Started),
+            now + SCROLL_EVENT_SEPARATION,
+        );
+        assert_eq!(ongoing_scroll.axis, Some(Axis::Horizontal));
+        assert_eq!(momentum_delta, point(px(7.), px(0.)));
+
+        ongoing_scroll.filter_with_momentum_at(
+            &mut zero_delta,
+            TouchPhase::Moved,
+            Some(TouchPhase::Ended),
+            now + SCROLL_EVENT_SEPARATION + Duration::from_millis(1),
+        );
+        assert_eq!(ongoing_scroll.axis, None);
     }
 }

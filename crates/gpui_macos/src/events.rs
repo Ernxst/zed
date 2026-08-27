@@ -26,6 +26,23 @@ pub(crate) const ESCAPE_KEY: u16 = 0x1b;
 const TAB_KEY: u16 = 0x09;
 const SHIFT_TAB_KEY: u16 = 0x19;
 
+fn touch_phase_from_native(phase: NSEventPhase) -> TouchPhase {
+    match phase {
+        NSEventPhase::NSEventPhaseMayBegin | NSEventPhase::NSEventPhaseBegan => TouchPhase::Started,
+        NSEventPhase::NSEventPhaseEnded => TouchPhase::Ended,
+        NSEventPhase::NSEventPhaseCancelled => TouchPhase::Cancelled,
+        _ => TouchPhase::Moved,
+    }
+}
+
+fn momentum_phase_from_native(phase: NSEventPhase) -> Option<TouchPhase> {
+    if phase == NSEventPhase::NSEventPhaseNone {
+        None
+    } else {
+        Some(touch_phase_from_native(phase))
+    }
+}
+
 pub fn key_to_native(key: &str) -> Cow<'_, str> {
     use cocoa::appkit::*;
     let code = match key {
@@ -235,13 +252,7 @@ pub(crate) unsafe fn platform_input_from_native(
                 }
             }
             NSEventType::NSEventTypeMagnify => window_height.map(|window_height| {
-                let phase = match native_event.phase() {
-                    NSEventPhase::NSEventPhaseMayBegin | NSEventPhase::NSEventPhaseBegan => {
-                        TouchPhase::Started
-                    }
-                    NSEventPhase::NSEventPhaseEnded => TouchPhase::Ended,
-                    _ => TouchPhase::Moved,
-                };
+                let phase = touch_phase_from_native(native_event.phase());
 
                 let magnification = native_event.magnification() as f32;
 
@@ -256,13 +267,8 @@ pub(crate) unsafe fn platform_input_from_native(
                 })
             }),
             NSEventType::NSScrollWheel => window_height.map(|window_height| {
-                let phase = match native_event.phase() {
-                    NSEventPhase::NSEventPhaseMayBegin | NSEventPhase::NSEventPhaseBegan => {
-                        TouchPhase::Started
-                    }
-                    NSEventPhase::NSEventPhaseEnded => TouchPhase::Ended,
-                    _ => TouchPhase::Moved,
-                };
+                let phase = touch_phase_from_native(native_event.phase());
+                let momentum_phase = momentum_phase_from_native(native_event.momentumPhase());
 
                 let raw_data = point(
                     native_event.scrollingDeltaX() as f32,
@@ -282,6 +288,7 @@ pub(crate) unsafe fn platform_input_from_native(
                     ),
                     delta,
                     touch_phase: phase,
+                    momentum_phase,
                     modifiers: read_modifiers(native_event),
                 })
             }),
@@ -571,4 +578,33 @@ fn chars_for_modified_key(code: CGKeyCode, modifiers: u32) -> String {
         let _: () = msg_send![keyboard, release];
     }
     String::from_utf16(&buffer[..buffer_size]).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_appkit_momentum_phases_separately_from_touch_phases() {
+        assert_eq!(
+            momentum_phase_from_native(NSEventPhase::NSEventPhaseNone),
+            None
+        );
+        assert_eq!(
+            momentum_phase_from_native(NSEventPhase::NSEventPhaseBegan),
+            Some(TouchPhase::Started)
+        );
+        assert_eq!(
+            momentum_phase_from_native(NSEventPhase::NSEventPhaseChanged),
+            Some(TouchPhase::Moved)
+        );
+        assert_eq!(
+            momentum_phase_from_native(NSEventPhase::NSEventPhaseEnded),
+            Some(TouchPhase::Ended)
+        );
+        assert_eq!(
+            momentum_phase_from_native(NSEventPhase::NSEventPhaseCancelled),
+            Some(TouchPhase::Cancelled)
+        );
+    }
 }

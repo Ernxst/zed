@@ -455,6 +455,7 @@ impl WebWindowInner {
             )),
             modifiers,
             touch_phase: phase,
+            momentum_phase: None,
         }));
     }
 
@@ -646,6 +647,7 @@ impl WebWindowInner {
                 delta,
                 modifiers,
                 touch_phase: TouchPhase::Moved,
+                momentum_phase: None,
             }));
         })
     }
