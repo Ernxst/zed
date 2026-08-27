@@ -181,6 +181,11 @@ impl VisualTestAppContext {
         lock.update_window(window, f)
     }
 
+    fn draw_window(&mut self, window: AnyWindowHandle) {
+        self.update_window(window, |_, window, cx| window.draw(cx).clear(cx))
+            .ok();
+    }
+
     /// Spawns a task on the foreground executor.
     pub fn spawn<F, R>(&self, f: F) -> Task<R>
     where
@@ -229,6 +234,7 @@ impl VisualTestAppContext {
             self.dispatch_keystroke(window, keystroke);
         }
         self.run_until_parked();
+        self.draw_window(window);
     }
 
     /// Dispatches a single keystroke to a window.
@@ -237,6 +243,7 @@ impl VisualTestAppContext {
             window.dispatch_keystroke(keystroke, cx);
         })
         .ok();
+        self.draw_window(window);
     }
 
     /// Simulates typing text input on the given window.
@@ -251,6 +258,7 @@ impl VisualTestAppContext {
             self.dispatch_keystroke(window, keystroke);
         }
         self.run_until_parked();
+        self.draw_window(window);
     }
 
     /// Simulates a mouse move event.
@@ -323,11 +331,13 @@ impl VisualTestAppContext {
 
     /// Simulates an input event on the given window.
     pub fn simulate_event<E: InputEvent>(&mut self, window: AnyWindowHandle, event: E) {
+        self.draw_window(window);
         self.update_window(window, |_, window, cx| {
             window.dispatch_event(event.to_platform_input(), cx);
         })
         .ok();
         self.run_until_parked();
+        self.draw_window(window);
     }
 
     /// Dispatches an action to the given window.
@@ -337,6 +347,7 @@ impl VisualTestAppContext {
         })
         .ok();
         self.run_until_parked();
+        self.draw_window(window);
     }
 
     /// Writes to the clipboard.
@@ -382,7 +393,10 @@ impl VisualTestAppContext {
     /// which does not require the window to be visible on screen.
     #[cfg(any(test, feature = "test-support"))]
     pub fn capture_screenshot(&mut self, window: AnyWindowHandle) -> Result<RgbaImage> {
-        self.update_window(window, |_, window, _cx| window.render_to_image())?
+        self.update_window(window, |_, window, cx| {
+            window.draw(cx).clear(cx);
+            window.render_to_image()
+        })?
     }
 
     /// Waits for animations to complete by waiting a couple of frames.

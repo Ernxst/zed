@@ -151,14 +151,26 @@ impl HeadlessAppContext {
         f(&mut app)
     }
 
-    /// Updates a window and calls draw to render.
+    /// Updates a window and explicitly draws the resulting frame.
     pub fn update_window<R>(
         &mut self,
         window: AnyWindowHandle,
         f: impl FnOnce(AnyView, &mut Window, &mut App) -> R,
     ) -> Result<R> {
+        self.update_window_and_draw(window, f)
+    }
+
+    fn update_window_and_draw<R>(
+        &mut self,
+        window: AnyWindowHandle,
+        f: impl FnOnce(AnyView, &mut Window, &mut App) -> R,
+    ) -> Result<R> {
         let mut app = self.app.borrow_mut();
-        app.update_window(window, f)
+        app.update_window(window, |view, window, cx| {
+            let result = f(view, window, cx);
+            window.draw(cx).clear(cx);
+            result
+        })
     }
 
     /// Captures a screenshot from a window.
@@ -167,7 +179,10 @@ impl HeadlessAppContext {
     /// returns `Some` via [`HeadlessAppContext::with_platform`].
     pub fn capture_screenshot(&mut self, window: AnyWindowHandle) -> Result<RgbaImage> {
         let mut app = self.app.borrow_mut();
-        app.update_window(window, |_, window, _| window.render_to_image())?
+        app.update_window(window, |_, window, cx| {
+            window.draw(cx).clear(cx);
+            window.render_to_image()
+        })?
     }
 
     /// Returns the text system.
@@ -242,8 +257,7 @@ impl AppContext for HeadlessAppContext {
     where
         F: FnOnce(AnyView, &mut Window, &mut App) -> T,
     {
-        let mut lock = self.app.borrow_mut();
-        lock.update_window(window, f)
+        self.update_window_and_draw(window, f)
     }
 
     fn with_window<R>(
