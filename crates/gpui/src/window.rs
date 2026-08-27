@@ -6636,6 +6636,36 @@ impl Window {
         self.a11y.debug_tree_json()
     }
 
+    /// Activate or deactivate accessibility tree construction in tests.
+    ///
+    /// This mirrors the platform adapter's activation callback while keeping
+    /// test code on the same tree-building path as assistive technology.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_a11y_active_for_test(&mut self, active: bool) {
+        self.a11y.set_active_for_test(active);
+        self.refresh();
+    }
+
+    /// Dispatch an AccessKit action through the production window handler.
+    #[cfg(all(any(test, feature = "test-support"), not(target_family = "wasm")))]
+    pub fn simulate_a11y_action_for_test(
+        &mut self,
+        target_node: accesskit::NodeId,
+        action: accesskit::Action,
+        data: Option<accesskit::ActionData>,
+        cx: &mut App,
+    ) {
+        self.handle_a11y_action(
+            accesskit::ActionRequest {
+                action,
+                target_tree: accesskit::TreeId::ROOT,
+                target_node,
+                data,
+            },
+            cx,
+        );
+    }
+
     /// Register a listener for an accessibility action on a specific node.
     /// The listener will be called when a screen reader requests the given
     /// action on the node identified by `node_id`.

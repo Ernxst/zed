@@ -217,6 +217,11 @@ impl A11y {
         self.active_this_frame
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn set_active_for_test(&mut self, active: bool) {
+        self.active_flag.store(active, Ordering::SeqCst);
+    }
+
     pub(crate) fn set_focusable(&mut self, node_id: NodeId, focus_id: FocusId) {
         self.focus_ids.insert(node_id, focus_id);
     }
@@ -652,6 +657,18 @@ mod tests {
         let mut a11y = A11y::new(Arc::new(AtomicBool::new(true)), false, None);
         a11y.begin_frame();
         a11y
+    }
+
+    #[test]
+    fn test_support_can_control_adapter_activation() {
+        let mut a11y = A11y::new(Arc::new(AtomicBool::new(false)), false, None);
+
+        a11y.sync_active_flag();
+        assert!(!a11y.is_active());
+
+        a11y.set_active_for_test(true);
+        a11y.sync_active_flag();
+        assert!(a11y.is_active());
     }
 
     #[test]
