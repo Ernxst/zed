@@ -750,6 +750,26 @@ pub trait InteractiveElement: Sized {
         Stateful { element: self }
     }
 
+    /// Observe this element's own bounds every time it is painted.
+    ///
+    /// Unlike `Div::on_children_prepainted`, this needs no extra wrapper element,
+    /// so it can record the bounds of a leaf such as an image or an SVG without
+    /// changing how that leaf participates in layout.
+    ///
+    /// It reports from paint rather than prepaint because prepaint is
+    /// speculative: `List::prepaint` prepaints a range of rows, and can then roll
+    /// the window back through `Window::transact` and prepaint a different range.
+    /// A listener that ran in prepaint would keep the bounds of a row that is not
+    /// on screen. It does not fire for an element whose style is
+    /// `Visibility::Hidden`, which paints nothing.
+    fn on_painted(
+        mut self,
+        listener: impl Fn(Bounds<Pixels>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.interactivity().paint_bounds_listener = Some(Box::new(listener));
+        self
+    }
+
     /// Track the focus state of the given focus handle on this element.
     /// If the focus handle is focused by the application, this element will
     /// apply its focused styles.
@@ -2107,6 +2127,7 @@ pub struct Interactivity {
     pub(crate) tooltip_builder: Option<TooltipBuilder>,
     pub(crate) tooltip_show_delay: Option<Duration>,
     pub(crate) window_control: Option<WindowControlArea>,
+    pub(crate) paint_bounds_listener: Option<Box<dyn Fn(Bounds<Pixels>, &mut Window, &mut App)>>,
     pub(crate) hitbox_behavior: HitboxBehavior,
     pub(crate) capture_pointer: bool,
     pub(crate) tab_index: Option<isize>,
@@ -2331,6 +2352,11 @@ impl Interactivity {
             || self.tracked_focus_handle.is_some()
             || self.hover_style.is_some()
             || self.group_hover_style.is_some()
+            // `.active(..)` reads `clicked_state`, which `paint_mouse_listeners` only
+            // maintains when a hitbox exists. Without this, an active style silently
+            // did nothing unless the element also had a click listener or a hover style.
+            || self.active_style.is_some()
+            || self.group_active_style.is_some()
             || self.hover_listener.is_some()
             || !self.mouse_up_listeners.is_empty()
             || !self.mouse_pressure_listeners.is_empty()
@@ -2454,6 +2480,10 @@ impl Interactivity {
 
                 if style.visibility == Visibility::Hidden {
                     return ((), element_state);
+                }
+
+                if let Some(listener) = self.paint_bounds_listener.take() {
+                    listener(bounds, window, cx);
                 }
 
                 let mut tab_group = None;
@@ -4382,7 +4412,7 @@ mod tests {
     use super::*;
     use crate::{
         AnyWindowHandle, AppContext as _, Context, InputEvent, Keystroke, Modifiers,
-        MouseMoveEvent, TestAppContext, canvas, util::FluentBuilder as _,
+        MouseMoveEvent, TestAppContext, canvas, svg, util::FluentBuilder as _,
     };
     use std::{
         cell::{Cell, RefCell},
@@ -4728,6 +4758,140 @@ mod tests {
         })
         .unwrap();
         assert_eq!(*hover_transitions.borrow(), [true]);
+    }
+
+    struct ActiveStyleTestView {
+        painted_width: Rc<Cell<Pixels>>,
+    }
+
+    impl Render for ActiveStyleTestView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let painted_width = self.painted_width.clone();
+            div().relative().size_full().child(
+                div()
+                    .id("active-target")
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size(px(10.))
+                    .active(|style| style.size(px(20.)))
+                    .child(canvas(
+                        move |bounds, _, _| painted_width.set(bounds.size.width),
+                        |_, _, _, _| {},
+                    )),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn active_styles_apply_without_a_click_listener(cx: &mut TestAppContext) {
+        let painted_width = Rc::new(Cell::new(px(0.)));
+        let window = cx.add_window({
+            let painted_width = painted_width.clone();
+            move |_, _| ActiveStyleTestView { painted_width }
+        });
+        let any_window = AnyWindowHandle::from(window);
+        let mouse_position = point(px(5.), px(5.));
+
+        cx.update_window(any_window, |_, window, cx| {
+            window.draw(cx).clear(cx);
+            window.simulate_mouse_move(mouse_position, cx);
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        assert_eq!(painted_width.get(), px(10.));
+
+        cx.update_window(any_window, |_, window, cx| {
+            window.dispatch_event(
+                MouseDownEvent {
+                    position: mouse_position,
+                    button: MouseButton::Left,
+                    modifiers: Default::default(),
+                    click_count: 1,
+                    first_mouse: false,
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        assert_eq!(painted_width.get(), px(20.));
+
+        cx.update_window(any_window, |_, window, cx| {
+            window.dispatch_event(
+                MouseUpEvent {
+                    position: mouse_position,
+                    button: MouseButton::Left,
+                    modifiers: Default::default(),
+                    click_count: 1,
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        assert_eq!(painted_width.get(), px(10.));
+    }
+
+    struct PaintedBoundsTestView {
+        hidden: bool,
+        recorded: Rc<RefCell<Vec<Bounds<Pixels>>>>,
+    }
+
+    impl Render for PaintedBoundsTestView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let recorded = self.recorded.clone();
+            div().relative().size_full().child(
+                svg()
+                    .absolute()
+                    .top(px(4.))
+                    .left(px(8.))
+                    .size(px(16.))
+                    .when(self.hidden, |this| this.invisible())
+                    .on_painted(move |bounds, _, _| recorded.borrow_mut().push(bounds)),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn on_painted_reports_the_bounds_of_a_leaf_element(cx: &mut TestAppContext) {
+        let recorded = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.add_window({
+            let recorded = recorded.clone();
+            move |_, _| PaintedBoundsTestView {
+                hidden: false,
+                recorded,
+            }
+        });
+        let any_window = AnyWindowHandle::from(window);
+
+        cx.update_window(any_window, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+
+        // A draw can repaint, so only the reported geometry is asserted here,
+        // not the call count.
+        let last = *recorded
+            .borrow()
+            .last()
+            .expect("the listener ran at least once");
+        assert_eq!(last.origin, point(px(8.), px(4.)));
+        assert_eq!(last.size, size(px(16.), px(16.)));
+
+        window
+            .update(cx, |view, _, cx| {
+                view.hidden = true;
+                cx.notify();
+            })
+            .unwrap();
+        recorded.borrow_mut().clear();
+        cx.update_window(any_window, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        assert!(
+            recorded.borrow().is_empty(),
+            "a hidden element paints nothing and must report no bounds"
+        );
     }
 
     struct TestTooltipView;
