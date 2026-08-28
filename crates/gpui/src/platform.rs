@@ -189,6 +189,15 @@ pub trait Platform: 'static {
     /// Returns the appearance of the application's windows.
     fn window_appearance(&self) -> WindowAppearance;
 
+    /// Returns whether the operating system prefers reduced motion.
+    fn should_reduce_motion(&self) -> bool {
+        false
+    }
+
+    /// Registers a callback invoked when the operating system's reduced-motion
+    /// preference changes.
+    fn on_reduce_motion_change(&self, _callback: Box<dyn FnMut()>) {}
+
     /// Overrides the appearance (light/dark) applied to the app's windows, independent
     /// of the OS-wide setting. Pass `None` to clear the override and follow the system
     /// again. The override is reflected by [`Platform::window_appearance`].

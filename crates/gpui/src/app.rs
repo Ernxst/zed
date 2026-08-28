@@ -714,6 +714,8 @@ pub struct App {
     pub(crate) keystroke_observers: SubscriberSet<(), KeystrokeObserver>,
     pub(crate) keystroke_interceptors: SubscriberSet<(), KeystrokeObserver>,
     pub(crate) keyboard_layout_observers: SubscriberSet<(), Handler>,
+    pub(crate) reduce_motion_observers: SubscriberSet<(), Handler>,
+    reduce_motion_platform_observer_registered: Cell<bool>,
     pub(crate) thermal_state_observers: SubscriberSet<(), Handler>,
     pub(crate) system_wake_observers: SubscriberSet<(), Handler>,
     pub(crate) release_listeners: SubscriberSet<EntityId, ReleaseListener>,
@@ -848,6 +850,8 @@ impl App {
                 keystroke_observers: SubscriberSet::new(),
                 keystroke_interceptors: SubscriberSet::new(),
                 keyboard_layout_observers: SubscriberSet::new(),
+                reduce_motion_observers: SubscriberSet::new(),
+                reduce_motion_platform_observer_registered: Cell::new(false),
                 thermal_state_observers: SubscriberSet::new(),
                 system_wake_observers: SubscriberSet::new(),
                 global_observers: SubscriberSet::new(),
@@ -1350,6 +1354,41 @@ impl App {
     /// Returns the current thermal state of the system.
     pub fn thermal_state(&self) -> ThermalState {
         self.platform.thermal_state()
+    }
+
+    /// Returns whether the operating system prefers reduced motion.
+    pub fn should_reduce_motion(&self) -> bool {
+        self.platform.should_reduce_motion()
+    }
+
+    /// Invokes a handler when the operating system's reduced-motion preference changes.
+    pub fn on_reduce_motion_change<F>(&self, mut callback: F) -> Subscription
+    where
+        F: 'static + FnMut(&mut App),
+    {
+        let (subscription, activate) = self.reduce_motion_observers.insert(
+            (),
+            Box::new(move |cx| {
+                callback(cx);
+                true
+            }),
+        );
+        activate();
+        if !self
+            .reduce_motion_platform_observer_registered
+            .replace(true)
+        {
+            let app = self.this.clone();
+            self.platform.on_reduce_motion_change(Box::new(move || {
+                if let Some(app) = app.upgrade() {
+                    let cx = &mut app.borrow_mut();
+                    cx.reduce_motion_observers
+                        .clone()
+                        .retain(&(), move |callback| (callback)(cx));
+                }
+            }));
+        }
+        subscription
     }
 
     /// Invokes a handler when the thermal state changes
@@ -3168,6 +3207,21 @@ mod test {
         });
 
         assert_eq!(*observation_count.borrow(), 2);
+    }
+
+    #[test]
+    fn reduce_motion_platform_observer_is_lazy_and_registered_once() {
+        let cx = TestAppContext::single();
+
+        cx.update(|cx| {
+            assert!(!cx.reduce_motion_platform_observer_registered.get());
+
+            let _first = cx.on_reduce_motion_change(|_| {});
+            assert!(cx.reduce_motion_platform_observer_registered.get());
+
+            let _second = cx.on_reduce_motion_change(|_| {});
+            assert!(cx.reduce_motion_platform_observer_registered.get());
+        });
     }
 
     #[gpui::test]

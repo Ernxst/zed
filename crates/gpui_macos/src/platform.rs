@@ -161,6 +161,11 @@ unsafe fn build_classes() {
             );
 
             decl.add_method(
+                sel!(onReduceMotionChange:),
+                on_reduce_motion_change as extern "C" fn(&mut Object, Sel, id),
+            );
+
+            decl.add_method(
                 sel!(onSystemWake:),
                 on_system_wake as extern "C" fn(&mut Object, Sel, id),
             );
@@ -198,6 +203,10 @@ pub(crate) struct MacPlatformState {
     reopen: Option<Box<dyn FnMut()>>,
     on_keyboard_layout_change: Option<Box<dyn FnMut()>>,
     on_thermal_state_change: Option<Box<dyn FnMut()>>,
+    on_reduce_motion_change: Option<Box<dyn FnMut()>>,
+    reduce_motion_observer_registered: bool,
+    #[cfg(feature = "test-support")]
+    test_reduce_motion_override: Option<bool>,
     on_system_wake: Option<Box<dyn FnMut()>>,
     system_wake_observer_registered: bool,
     quit: Option<Box<dyn FnMut() -> bool>>,
@@ -258,6 +267,10 @@ impl MacPlatform {
             dock_menu: None,
             on_keyboard_layout_change: None,
             on_thermal_state_change: None,
+            on_reduce_motion_change: None,
+            reduce_motion_observer_registered: false,
+            #[cfg(feature = "test-support")]
+            test_reduce_motion_override: None,
             on_system_wake: None,
             system_wake_observer_registered: false,
             menus: None,
@@ -360,6 +373,34 @@ impl MacPlatform {
             (*app).set_ivar(MAC_PLATFORM_IVAR, self_ptr);
             (*app_delegate).set_ivar(MAC_PLATFORM_IVAR, self_ptr);
             REGISTERED_MAC_PLATFORM.store(self_ptr as *mut c_void, Ordering::Release);
+        }
+    }
+
+    unsafe fn owns_app_delegate(&self, delegate: id) -> bool {
+        if delegate == nil {
+            return false;
+        }
+
+        unsafe {
+            let delegate_class: *const Class = msg_send![delegate, class];
+            if delegate_class != APP_DELEGATE_CLASS {
+                return false;
+            }
+            let platform_ptr: *mut c_void = *(*delegate).get_ivar(MAC_PLATFORM_IVAR);
+            platform_ptr == self as *const Self as *mut c_void
+        }
+    }
+
+    /// Test seam that delivers the same NSWorkspace notification as System Settings.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn test_set_reduce_motion_and_post_notification(&self, reduce_motion: bool) {
+        self.0.lock().test_reduce_motion_override = Some(reduce_motion);
+        unsafe {
+            let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+            let workspace_center: id = msg_send![workspace, notificationCenter];
+            let name = ns_string("NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification");
+            let _: () = msg_send![workspace_center, postNotificationName: name object: nil];
         }
     }
 
@@ -1021,6 +1062,39 @@ impl Platform for MacPlatform {
         }
     }
 
+    fn should_reduce_motion(&self) -> bool {
+        #[cfg(feature = "test-support")]
+        if let Some(reduce_motion) = self.0.lock().test_reduce_motion_override {
+            return reduce_motion;
+        }
+
+        unsafe {
+            let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+            let reduce_motion: BOOL = msg_send![workspace, accessibilityDisplayShouldReduceMotion];
+            reduce_motion == YES
+        }
+    }
+
+    fn on_reduce_motion_change(&self, callback: Box<dyn FnMut()>) {
+        let mut state = self.0.lock();
+        state.on_reduce_motion_change = Some(callback);
+        if state.reduce_motion_observer_registered {
+            return;
+        }
+        drop(state);
+
+        // A foreign embedder may already own NSApplication.delegate before run().
+        // Register only after GPUI has installed and tagged its own delegate.
+        unsafe {
+            let app: id = msg_send![APP_CLASS, sharedApplication];
+            let delegate: id = msg_send![app, delegate];
+            if self.owns_app_delegate(delegate) {
+                register_reduce_motion_observer(delegate);
+                self.0.lock().reduce_motion_observer_registered = true;
+            }
+        }
+    }
+
     fn set_window_appearance(&self, appearance: Option<WindowAppearance>) {
         unsafe {
             let app: id = msg_send![APP_CLASS, sharedApplication];
@@ -1655,6 +1729,10 @@ extern "C" fn did_finish_launching(this: &mut Object, _: Sel, _: id) {
         };
         let (callback, embedded) = {
             let mut state = platform.0.lock();
+            if state.on_reduce_motion_change.is_some() && !state.reduce_motion_observer_registered {
+                register_reduce_motion_observer(observer);
+                state.reduce_motion_observer_registered = true;
+            }
             if state.on_system_wake.is_some() && !state.system_wake_observer_registered {
                 register_system_wake_observer(observer);
                 state.system_wake_observer_registered = true;
@@ -1674,6 +1752,21 @@ extern "C" fn did_finish_launching(this: &mut Object, _: Sel, _: id) {
         if embedded || callback_panicked {
             stop_app_immediately();
         }
+    }
+}
+
+unsafe fn register_reduce_motion_observer(observer: id) {
+    // SAFETY: observer is an Objective-C object implementing onReduceMotionChange:.
+    unsafe {
+        let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let workspace_center: *mut Object = msg_send![workspace, notificationCenter];
+        let reduce_motion_name =
+            ns_string("NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification");
+        let _: () = msg_send![workspace_center, addObserver: observer
+            selector: sel!(onReduceMotionChange:)
+            name: reduce_motion_name
+            object: nil
+        ];
     }
 }
 
@@ -1762,6 +1855,34 @@ extern "C" fn on_thermal_state_change(this: &mut Object, _: Sel, _: id) {
                 .0
                 .lock()
                 .on_thermal_state_change
+                .get_or_insert(callback);
+        }
+    }
+}
+
+extern "C" fn on_reduce_motion_change(this: &mut Object, _: Sel, _: id) {
+    // NSWorkspace delivers this notification synchronously. Defer so a settings
+    // toggle cannot re-enter an active App borrow.
+    let Some(platform) = (unsafe { get_mac_platform(this) }) else {
+        return;
+    };
+    let platform_ptr = platform as *const MacPlatform as *mut c_void;
+    unsafe {
+        DispatchQueue::main().exec_async_f(platform_ptr, on_reduce_motion_change);
+    }
+
+    extern "C" fn on_reduce_motion_change(context: *mut c_void) {
+        let Some(platform) = registered_mac_platform(context) else {
+            return;
+        };
+        let mut lock = platform.0.lock();
+        if let Some(mut callback) = lock.on_reduce_motion_change.take() {
+            drop(lock);
+            callback();
+            platform
+                .0
+                .lock()
+                .on_reduce_motion_change
                 .get_or_insert(callback);
         }
     }
@@ -1896,6 +2017,51 @@ unsafe fn ns_url_to_path(url: id) -> Result<PathBuf> {
     Ok(PathBuf::from(OsStr::from_bytes(unsafe {
         CStr::from_ptr(path).to_bytes()
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_reduce_motion_preference() {
+        let platform = MacPlatform::new(true);
+        let preference: bool = platform.should_reduce_motion();
+        assert!(matches!(preference, true | false));
+    }
+
+    #[test]
+    fn does_not_register_reduce_motion_selector_on_a_foreign_delegate() {
+        let registered = unsafe {
+            let pool = NSAutoreleasePool::new(nil);
+            let app: id = msg_send![APP_CLASS, sharedApplication];
+            let previous_delegate: id = msg_send![app, delegate];
+            if previous_delegate != nil {
+                let _: id = msg_send![previous_delegate, retain];
+            }
+            let foreign_delegate: id = msg_send![class!(NSObject), new];
+            app.setDelegate_(foreign_delegate);
+
+            let platform = MacPlatform::new(true);
+            platform.on_reduce_motion_change(Box::new(|| {}));
+            let registered = platform.0.lock().reduce_motion_observer_registered;
+
+            if registered {
+                let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+                let center: id = msg_send![workspace, notificationCenter];
+                let _: () = msg_send![center, removeObserver: foreign_delegate];
+            }
+            app.setDelegate_(previous_delegate);
+            let _: () = msg_send![foreign_delegate, release];
+            if previous_delegate != nil {
+                let _: () = msg_send![previous_delegate, release];
+            }
+            pool.drain();
+            registered
+        };
+
+        assert!(!registered);
+    }
 }
 
 #[link(name = "Carbon", kind = "framework")]
