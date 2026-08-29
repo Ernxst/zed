@@ -389,7 +389,9 @@ impl IntoElement for SharedString {
 /// For text with a uniform style, you can usually avoid calling this constructor
 /// and just pass text directly.
 pub struct StyledText {
+    id: Option<ElementId>,
     text: SharedString,
+    accessibility_value: Option<SharedString>,
     runs: Option<Vec<TextRun>>,
     delayed_highlights: Option<Vec<(Range<usize>, HighlightStyle)>>,
     delayed_font_family_overrides: Option<Vec<(Range<usize>, SharedString)>>,
@@ -400,12 +402,33 @@ impl StyledText {
     /// Construct a new styled text element from the given string.
     pub fn new(text: impl Into<SharedString>) -> Self {
         StyledText {
+            id: None,
             text: text.into(),
+            accessibility_value: None,
             runs: None,
             delayed_highlights: None,
             delayed_font_family_overrides: None,
             layout: TextLayout::default(),
         }
+    }
+
+    /// Produce a new [`StyledText`] with the given `id`.
+    ///
+    /// An ID makes the text available to accessibility clients, matching
+    /// [`Text::with_id`].
+    pub fn with_id(mut self, id: impl Into<ElementId>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
+    /// Override the value exposed to accessibility clients.
+    ///
+    /// By default an identified [`StyledText`] exposes its painted string.
+    /// Use this when some painted runs are deliberately excluded from the
+    /// accessibility tree.
+    pub fn with_accessibility_value(mut self, value: impl Into<SharedString>) -> Self {
+        self.accessibility_value = Some(value.into());
+        self
     }
 
     /// Get the layout for this element. This can be used to map indices to pixels and vice versa.
@@ -544,11 +567,24 @@ impl Element for StyledText {
     type PrepaintState = ();
 
     fn id(&self) -> Option<ElementId> {
-        None
+        self.id.clone()
     }
 
     fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
         None
+    }
+
+    fn a11y_role(&self) -> Option<accesskit::Role> {
+        self.id.is_some().then_some(accesskit::Role::Label)
+    }
+
+    fn write_a11y_info(&self, node: &mut accesskit::Node) {
+        node.set_value(
+            self.accessibility_value
+                .as_ref()
+                .unwrap_or(&self.text)
+                .to_string(),
+        );
     }
 
     fn request_layout(
@@ -1324,6 +1360,21 @@ mod tests {
             make_text_unstable_id(false).id,
             make_text_unstable_id(true).id
         );
+    }
+
+    #[test]
+    fn styled_text_accessibility_requires_an_id_and_supports_a_value_override() {
+        let inaccessible = StyledText::new("painted");
+        assert_eq!(inaccessible.a11y_role(), None);
+
+        let accessible = StyledText::new("painted")
+            .with_id("styled-text")
+            .with_accessibility_value("readable");
+        assert_eq!(accessible.a11y_role(), Some(accesskit::Role::Label));
+
+        let mut node = accesskit::Node::new(accesskit::Role::Label);
+        accessible.write_a11y_info(&mut node);
+        assert_eq!(node.value(), Some("readable"));
     }
 
     #[test]
