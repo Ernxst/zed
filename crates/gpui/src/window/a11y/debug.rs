@@ -262,6 +262,9 @@ fn node_to_json(
     if let Some(v) = node.is_selected() {
         aria.insert("selected".into(), json!(v));
     }
+    if let Some(v) = node.aria_current() {
+        aria.insert("current".into(), json!(format!("{v:?}")));
+    }
     if let Some(v) = node.is_expanded() {
         aria.insert("expanded".into(), json!(v));
     }
