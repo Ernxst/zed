@@ -46,6 +46,18 @@ impl VisualTestAppContext {
         Self::with_asset_source(platform, Arc::new(()))
     }
 
+    /// Creates a context whose virtual display uses the requested scale factor.
+    pub fn with_virtual_display_scale_factor(
+        platform: Rc<dyn Platform>,
+        scale_factor: f32,
+    ) -> Self {
+        Self::with_asset_source_and_virtual_display_scale_factor(
+            platform,
+            Arc::new(()),
+            Some(scale_factor),
+        )
+    }
+
     /// Creates a new `VisualTestAppContext` with a custom asset source.
     ///
     /// Use this when you need SVG icons to render properly in visual tests.
@@ -54,13 +66,25 @@ impl VisualTestAppContext {
         platform: Rc<dyn Platform>,
         asset_source: Arc<dyn AssetSource>,
     ) -> Self {
+        Self::with_asset_source_and_virtual_display_scale_factor(platform, asset_source, None)
+    }
+
+    fn with_asset_source_and_virtual_display_scale_factor(
+        platform: Rc<dyn Platform>,
+        asset_source: Arc<dyn AssetSource>,
+        virtual_display_scale_factor: Option<f32>,
+    ) -> Self {
         // Use a seeded RNG for deterministic behavior
         let seed = std::env::var("SEED")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
 
-        let platform = Rc::new(VisualTestPlatform::new(platform, seed));
+        let platform = Rc::new(if let Some(scale_factor) = virtual_display_scale_factor {
+            VisualTestPlatform::with_virtual_display_scale_factor(platform, seed, scale_factor)
+        } else {
+            VisualTestPlatform::new(platform, seed)
+        });
 
         // Get the dispatcher and executors from the platform
         let dispatcher = platform.dispatcher().clone();

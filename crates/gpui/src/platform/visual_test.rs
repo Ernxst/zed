@@ -34,6 +34,7 @@ pub struct VisualTestPlatform {
     foreground_executor: ForegroundExecutor,
     platform: Rc<dyn Platform>,
     display: Rc<dyn PlatformDisplay>,
+    virtual_display_scale_factor: Option<f32>,
     clipboard: Mutex<Option<ClipboardItem>>,
     #[cfg(target_os = "macos")]
     find_pasteboard: Mutex<Option<ClipboardItem>>,
@@ -71,6 +72,23 @@ impl VisualTestPlatform {
     ///
     /// The seed is used for deterministic random number generation in the TestDispatcher.
     pub fn new(platform: Rc<dyn Platform>, seed: u64) -> Self {
+        Self::new_with_virtual_display_scale_factor(platform, seed, None)
+    }
+
+    /// Creates a new VisualTestPlatform with a virtual display scale factor.
+    pub fn with_virtual_display_scale_factor(
+        platform: Rc<dyn Platform>,
+        seed: u64,
+        scale_factor: f32,
+    ) -> Self {
+        Self::new_with_virtual_display_scale_factor(platform, seed, Some(scale_factor))
+    }
+
+    fn new_with_virtual_display_scale_factor(
+        platform: Rc<dyn Platform>,
+        seed: u64,
+        virtual_display_scale_factor: Option<f32>,
+    ) -> Self {
         let dispatcher = TestDispatcher::new(seed);
         let arc_dispatcher = Arc::new(dispatcher.clone());
 
@@ -83,6 +101,7 @@ impl VisualTestPlatform {
             foreground_executor,
             platform,
             display: Rc::new(VisualTestDisplay::new()),
+            virtual_display_scale_factor,
             clipboard: Mutex::new(None),
             #[cfg(target_os = "macos")]
             find_pasteboard: Mutex::new(None),
@@ -155,8 +174,12 @@ impl Platform for VisualTestPlatform {
         handle: AnyWindowHandle,
         options: WindowParams,
     ) -> Result<Box<dyn PlatformWindow>> {
-        self.platform
-            .open_window_for_visual_test(handle, options, self.display.clone())
+        self.platform.open_window_for_visual_test(
+            handle,
+            options,
+            self.display.clone(),
+            self.virtual_display_scale_factor,
+        )
     }
 
     fn window_appearance(&self) -> WindowAppearance {

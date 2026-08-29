@@ -626,6 +626,7 @@ struct MacWindowState {
     background_executor: BackgroundExecutor,
     native_window: id,
     native_view: NonNull<Object>,
+    virtual_display_scale_factor: Option<f32>,
     blurred_view: Option<id>,
     background_appearance: WindowBackgroundAppearance,
     cursor_style: CursorStyle,
@@ -899,7 +900,8 @@ impl MacWindowState {
     }
 
     fn scale_factor(&self) -> f32 {
-        get_scale_factor(self.native_window)
+        self.virtual_display_scale_factor
+            .unwrap_or_else(|| get_scale_factor(self.native_window))
     }
 
     fn window_bounds(&self) -> WindowBounds {
@@ -936,6 +938,7 @@ impl MacWindow {
             ..
         }: WindowParams,
         virtual_display_bounds: Option<Bounds<Pixels>>,
+        virtual_display_scale_factor: Option<f32>,
         cursor_visible: Arc<AtomicBool>,
         foreground_executor: ForegroundExecutor,
         background_executor: BackgroundExecutor,
@@ -1072,6 +1075,7 @@ impl MacWindow {
                 background_executor,
                 native_window,
                 native_view: NonNull::new_unchecked(native_view),
+                virtual_display_scale_factor,
                 blurred_view: None,
                 background_appearance: WindowBackgroundAppearance::Opaque,
                 cursor_style: CursorStyle::Arrow,
@@ -1281,6 +1285,10 @@ impl MacWindow {
                 let mut window_state = window.0.lock();
                 window_state.move_traffic_light();
                 window_state.sheet_parent = sheet_parent;
+            }
+
+            if virtual_display_scale_factor.is_some() {
+                update_window_scale_factor(&window.0);
             }
 
             window

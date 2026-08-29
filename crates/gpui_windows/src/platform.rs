@@ -589,7 +589,12 @@ impl Platform for WindowsPlatform {
         handle: AnyWindowHandle,
         options: WindowParams,
         display: Rc<dyn PlatformDisplay>,
+        virtual_display_scale_factor: Option<f32>,
     ) -> Result<Box<dyn PlatformWindow>> {
+        anyhow::ensure!(
+            virtual_display_scale_factor.is_none(),
+            "virtual display scale factors are not supported on Windows"
+        );
         let window = WindowsWindow::new(
             handle,
             options,

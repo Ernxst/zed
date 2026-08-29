@@ -182,7 +182,12 @@ pub trait Platform: 'static {
         handle: AnyWindowHandle,
         options: WindowParams,
         _display: Rc<dyn PlatformDisplay>,
+        virtual_display_scale_factor: Option<f32>,
     ) -> anyhow::Result<Box<dyn PlatformWindow>> {
+        anyhow::ensure!(
+            virtual_display_scale_factor.is_none(),
+            "virtual display scale factors are not supported by this platform"
+        );
         self.open_window(handle, options)
     }
 

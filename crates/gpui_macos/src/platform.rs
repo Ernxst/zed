@@ -1017,6 +1017,7 @@ impl Platform for MacPlatform {
             handle,
             options,
             None,
+            None,
             cursor_visible,
             foreground_executor,
             background_executor,
@@ -1031,6 +1032,7 @@ impl Platform for MacPlatform {
         handle: AnyWindowHandle,
         options: WindowParams,
         display: Rc<dyn PlatformDisplay>,
+        virtual_display_scale_factor: Option<f32>,
     ) -> Result<Box<dyn PlatformWindow>> {
         let (cursor_visible, foreground_executor, background_executor, renderer_context) = {
             let guard = self.0.lock();
@@ -1046,6 +1048,7 @@ impl Platform for MacPlatform {
             handle,
             options,
             Some(display.bounds()),
+            virtual_display_scale_factor,
             cursor_visible,
             foreground_executor,
             background_executor,
