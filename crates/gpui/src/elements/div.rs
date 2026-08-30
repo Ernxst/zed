@@ -1946,7 +1946,8 @@ impl Element for Div {
         let mut child_min = point(Pixels::MAX, Pixels::MAX);
         let mut child_max = Point::default();
         if let Some(handle) = self.interactivity.scroll_anchor.as_ref() {
-            *handle.last_origin.borrow_mut() = bounds.origin - window.element_offset();
+            *handle.last_bounds.borrow_mut() =
+                Bounds::new(bounds.origin - window.element_offset(), bounds.size);
         }
         let content_size = if request_layout.child_layout_ids.is_empty() {
             bounds.size
@@ -2749,12 +2750,16 @@ impl Interactivity {
         // This behavior can be suppressed by using `cx.prevent_default()`.
         if let Some(focus_handle) = self.tracked_focus_handle.clone() {
             let hitbox = hitbox.clone();
+            let scroll_anchor = self.scroll_anchor.clone();
             window.on_mouse_event(move |_: &MouseDownEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble
                     && hitbox.is_hovered(window)
                     && !window.default_prevented()
                 {
                     window.focus(&focus_handle, cx);
+                    if let Some(scroll_anchor) = &scroll_anchor {
+                        scroll_anchor.scroll_to_reveal();
+                    }
                     // If there is a parent that is also focusable, prevent it
                     // from transferring focus because we already did so.
                     window.prevent_default();
@@ -4193,7 +4198,7 @@ where
 #[derive(Clone)]
 pub struct ScrollAnchor {
     handle: ScrollHandle,
-    last_origin: Rc<RefCell<Point<Pixels>>>,
+    last_bounds: Rc<RefCell<Bounds<Pixels>>>,
 }
 
 impl ScrollAnchor {
@@ -4201,7 +4206,7 @@ impl ScrollAnchor {
     pub fn for_handle(handle: ScrollHandle) -> Self {
         Self {
             handle,
-            last_origin: Default::default(),
+            last_bounds: Default::default(),
         }
     }
     /// Request scroll to this item on the next frame.
@@ -4210,9 +4215,40 @@ impl ScrollAnchor {
 
         window.on_next_frame(move |_, _| {
             let viewport_bounds = this.handle.bounds();
-            let self_bounds = *this.last_origin.borrow();
-            this.handle.set_offset(viewport_bounds.origin - self_bounds);
+            let self_bounds = *this.last_bounds.borrow();
+            this.handle
+                .set_offset(viewport_bounds.origin - self_bounds.origin);
         });
+    }
+
+    /// Scroll by the smallest amount that makes this item fully visible in the
+    /// viewport. If the item is already visible, the scroll position is left
+    /// unchanged.
+    pub fn scroll_to_reveal(&self) {
+        let viewport = self.handle.bounds();
+        let anchor = *self.last_bounds.borrow();
+        let current_offset = self.handle.offset();
+        let bounds = Bounds::new(anchor.origin + current_offset, anchor.size);
+        let mut adjustment = Point::default();
+
+        if !(bounds.top() < viewport.top() && bounds.bottom() > viewport.bottom()) {
+            if bounds.top() < viewport.top() {
+                adjustment.y = viewport.top() - bounds.top();
+            } else if bounds.bottom() > viewport.bottom() {
+                adjustment.y = viewport.bottom() - bounds.bottom();
+            }
+        }
+        if !(bounds.left() < viewport.left() && bounds.right() > viewport.right()) {
+            if bounds.left() < viewport.left() {
+                adjustment.x = viewport.left() - bounds.left();
+            } else if bounds.right() > viewport.right() {
+                adjustment.x = viewport.right() - bounds.right();
+            }
+        }
+
+        if adjustment != Point::default() {
+            self.handle.set_offset(current_offset + adjustment);
+        }
     }
 }
 
