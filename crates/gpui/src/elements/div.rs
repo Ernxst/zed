@@ -1489,6 +1489,18 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Set the number of rows spanned by this element.
+    fn aria_row_span(mut self, span: usize) -> Self {
+        self.interactivity().aria.row_span = Some(span);
+        self
+    }
+
+    /// Set the number of columns spanned by this element.
+    fn aria_column_span(mut self, span: usize) -> Self {
+        self.interactivity().aria.column_span = Some(span);
+        self
+    }
+
     /// Register a handler for an accessibility action on this element.
     /// The handler is called when a screen reader requests the given action.
     ///
@@ -2076,6 +2088,8 @@ pub(crate) struct AriaProperties {
     pub(crate) column_index: Option<usize>,
     pub(crate) row_count: Option<usize>,
     pub(crate) column_count: Option<usize>,
+    pub(crate) row_span: Option<usize>,
+    pub(crate) column_span: Option<usize>,
 }
 
 /// The interactivity struct. Powers all of the general-purpose
@@ -3604,6 +3618,12 @@ impl Interactivity {
         }
         if let Some(count) = self.aria.column_count {
             node.set_column_count(count);
+        }
+        if let Some(span) = self.aria.row_span {
+            node.set_row_span(span);
+        }
+        if let Some(span) = self.aria.column_span {
+            node.set_column_span(span);
         }
         if !self.click_listeners.is_empty() {
             node.add_action(accesskit::Action::Click);

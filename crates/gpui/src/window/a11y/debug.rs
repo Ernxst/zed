@@ -314,6 +314,12 @@ fn node_to_json(
     if let Some(v) = node.column_count() {
         aria.insert("column_count".into(), json!(v));
     }
+    if let Some(v) = node.row_span() {
+        aria.insert("row_span".into(), json!(v));
+    }
+    if let Some(v) = node.column_span() {
+        aria.insert("column_span".into(), json!(v));
+    }
 
     map.insert("aria".into(), serde_json::Value::Object(aria));
 
