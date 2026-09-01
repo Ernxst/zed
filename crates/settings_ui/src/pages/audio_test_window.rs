@@ -298,7 +298,7 @@ pub fn open_audio_test_window(_window: &mut Window, cx: &mut App) {
             app_id: Some(app_id.to_owned()),
             window_decorations: Some(gpui::WindowDecorations::Client),
             window_bounds: Some(WindowBounds::centered(window_size, cx)),
-            window_min_size: Some(window_min_size),
+            window_min_size: Some(window_min_size.into()),
             ..Default::default()
         },
         |_, cx| cx.new(AudioTestWindow::new),

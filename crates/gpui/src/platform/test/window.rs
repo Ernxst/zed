@@ -3,7 +3,7 @@ use crate::{
     DispatchEventResult, GpuSpecs, Pixels, PlatformAtlas, PlatformDisplay,
     PlatformHeadlessRenderer, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
     PromptButton, RequestFrameOptions, Scene, Size, TestPlatform, TileId, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowParams,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowMinSize, WindowParams,
 };
 use collections::HashMap;
 use gpui_util::ResultExt as _;
@@ -19,6 +19,7 @@ use std::{
 
 pub(crate) struct TestWindowState {
     pub(crate) bounds: Bounds<Pixels>,
+    window_min_size: Option<WindowMinSize>,
     pub(crate) handle: AnyWindowHandle,
     display: Rc<dyn PlatformDisplay>,
     pub(crate) title: Option<String>,
@@ -82,6 +83,7 @@ impl TestWindow {
         };
         Self(Rc::new(Mutex::new(TestWindowState {
             bounds: params.bounds,
+            window_min_size: params.window_min_size,
             display,
             platform,
             handle,
@@ -135,6 +137,18 @@ impl TestWindow {
     pub fn simulate_resize(&mut self, size: Size<Pixels>) {
         let scale_factor = self.scale_factor();
         let mut lock = self.0.lock();
+        let size = if let Some(window_min_size) = lock.window_min_size {
+            Size {
+                width: window_min_size
+                    .width
+                    .map_or(size.width, |width| size.width.max(width)),
+                height: window_min_size
+                    .height
+                    .map_or(size.height, |height| size.height.max(height)),
+            }
+        } else {
+            size
+        };
         // Always update bounds, even if no callback is registered
         lock.bounds.size = size;
         let Some(mut callback) = lock.resize_callback.take() else {

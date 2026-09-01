@@ -272,7 +272,11 @@ impl WaylandSurfaceState {
         };
 
         if let Some(size) = params.window_min_size {
-            toplevel.set_min_size(f32::from(size.width) as i32, f32::from(size.height) as i32);
+            // xdg_toplevel uses zero to mean no minimum for that dimension.
+            toplevel.set_min_size(
+                size.width.map_or(0, |width| f32::from(width) as i32),
+                size.height.map_or(0, |height| f32::from(height) as i32),
+            );
         }
 
         // Attempt to set up window decorations based on the requested configuration

@@ -228,10 +228,14 @@ impl WindowsWindowInner {
 
         unsafe {
             let minmax_info = &mut *(lparam.0 as *mut MINMAXINFO);
-            minmax_info.ptMinTrackSize.x = min_size.width.scale(scale_factor).as_f32() as i32
-                + boarder_offset.width_offset.get();
-            minmax_info.ptMinTrackSize.y = min_size.height.scale(scale_factor).as_f32() as i32
-                + boarder_offset.height_offset.get();
+            if let Some(width) = min_size.width {
+                minmax_info.ptMinTrackSize.x = width.scale(scale_factor).as_f32() as i32
+                    + boarder_offset.width_offset.get();
+            }
+            if let Some(height) = min_size.height {
+                minmax_info.ptMinTrackSize.y = height.scale(scale_factor).as_f32() as i32
+                    + boarder_offset.height_offset.get();
+            }
         }
         Some(0)
     }

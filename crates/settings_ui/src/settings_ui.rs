@@ -880,14 +880,14 @@ fn open_settings_editor_with(
                 window_background: cx.theme().window_background_appearance(),
                 app_id: Some(app_id.to_owned()),
                 window_decorations: Some(window_decorations),
-                window_min_size: Some(gpui::Size {
+                window_min_size: Some(gpui::WindowMinSize::new(
                     // Do not make the settings window thinner than this,
                     // otherwise, the space used to display the actual content
                     // gets so small that certain sections grow too tall due
                     // to intense text wrapping.
-                    width: SIDEBAR_WIDTH + CONTENT_MIN_WIDTH,
-                    height: px(240.0),
-                }),
+                    SIDEBAR_WIDTH + CONTENT_MIN_WIDTH,
+                    px(240.0),
+                )),
                 window_bounds: Some(WindowBounds::centered(scaled_bounds, cx)),
                 ..Default::default()
             },

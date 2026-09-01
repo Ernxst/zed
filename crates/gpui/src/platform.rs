@@ -1923,8 +1923,9 @@ pub struct WindowOptions {
     /// Application identifier of the window. Can by used by desktop environments to group applications together.
     pub app_id: Option<String>,
 
-    /// Window minimum size
-    pub window_min_size: Option<Size<Pixels>>,
+    /// Window minimum size. Each axis is optional so a caller can constrain one
+    /// dimension without overwriting the platform's default for the other.
+    pub window_min_size: Option<WindowMinSize>,
 
     /// Whether to use client or server-side decorations on X11 and Wayland.
     /// The platform may ignore requests it cannot satisfy.
@@ -1996,7 +1997,7 @@ pub struct WindowParams {
     #[cfg_attr(feature = "wayland", allow(dead_code))]
     pub app_id: Option<String>,
 
-    pub window_min_size: Option<Size<Pixels>>,
+    pub window_min_size: Option<WindowMinSize>,
 
     #[cfg(target_os = "macos")]
     pub tabbing_identifier: Option<String>,
@@ -2013,6 +2014,35 @@ pub enum WindowBounds {
     /// Indicates that the window should open in fullscreen mode.
     /// The bounds provided here represent the restore size of the window.
     Fullscreen(Bounds<Pixels>),
+}
+
+/// The optional lower bounds of a window's content area.
+///
+/// Backends must preserve their existing constraint for an axis set to `None`.
+/// This is deliberately not a `Size<Pixels>`: zero is a valid minimum on some
+/// platforms and does not consistently mean "leave the existing minimum alone".
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct WindowMinSize {
+    /// Minimum content width, when constrained by the caller.
+    pub width: Option<Pixels>,
+    /// Minimum content height, when constrained by the caller.
+    pub height: Option<Pixels>,
+}
+
+impl WindowMinSize {
+    /// Constrain both content dimensions.
+    pub const fn new(width: Pixels, height: Pixels) -> Self {
+        Self {
+            width: Some(width),
+            height: Some(height),
+        }
+    }
+}
+
+impl From<Size<Pixels>> for WindowMinSize {
+    fn from(size: Size<Pixels>) -> Self {
+        Self::new(size.width, size.height)
+    }
 }
 
 impl Default for WindowBounds {

@@ -773,8 +773,12 @@ impl X11WindowState {
             let max_texture_size = renderer.max_texture_size();
             let mut size_hints = WmSizeHints::new();
             if let Some(size) = params.window_min_size {
-                size_hints.min_size =
-                    Some((f32::from(size.width) as i32, f32::from(size.height) as i32));
+                // ICCCM has no per-axis min-size flag; zero is its documented
+                // unconstrained value for the omitted axis.
+                size_hints.min_size = Some((
+                    size.width.map_or(0, |width| f32::from(width) as i32),
+                    size.height.map_or(0, |height| f32::from(height) as i32),
+                ));
             }
             size_hints.max_size = Some((max_texture_size as i32, max_texture_size as i32));
             check_reply(

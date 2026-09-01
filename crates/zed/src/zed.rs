@@ -414,10 +414,10 @@ pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowO
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         icon: APP_ICON.as_ref().cloned(),
         window_decorations: Some(window_decorations),
-        window_min_size: Some(gpui::Size {
-            width: px(360.0),
-            height: px(240.0),
-        }),
+        window_min_size: Some(gpui::WindowMinSize::new(
+            px(360.0),
+            px(240.0),
+        )),
         tabbing_identifier: if use_system_window_tabs {
             Some(String::from("zed"))
         } else {

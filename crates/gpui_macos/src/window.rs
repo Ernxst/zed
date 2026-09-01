@@ -1147,9 +1147,14 @@ impl MacWindow {
             native_window.setMovable_(is_movable as BOOL);
 
             if let Some(window_min_size) = window_min_size {
+                let current_min_size = native_window.contentMinSize();
                 native_window.setContentMinSize_(NSSize {
-                    width: window_min_size.width.to_f64(),
-                    height: window_min_size.height.to_f64(),
+                    width: window_min_size
+                        .width
+                        .map_or(current_min_size.width, Pixels::to_f64),
+                    height: window_min_size
+                        .height
+                        .map_or(current_min_size.height, Pixels::to_f64),
                 });
             }
 

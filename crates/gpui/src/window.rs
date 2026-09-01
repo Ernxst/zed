@@ -22,7 +22,8 @@ use crate::{
     SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle,
     TextStyleRefinement, ThermalState, TransformationMatrix, Underline, UnderlineStyle,
     WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations,
-    WindowInsets, WindowOptions, WindowParams, WindowTextSystem, point, prelude::*, px, rems, size,
+    WindowInsets, WindowMinSize, WindowOptions, WindowParams, WindowTextSystem, point, prelude::*,
+    px, rems, size,
     transparent_black,
 };
 
@@ -1477,7 +1478,10 @@ impl Window {
             .as_ref()
             .and_then(|titlebar| titlebar.title.clone());
 
-        let window_bounds = window_bounds.unwrap_or_else(|| default_bounds(display_id, cx));
+        let window_bounds = constrain_window_bounds(
+            window_bounds.unwrap_or_else(|| default_bounds(display_id, cx)),
+            window_min_size,
+        );
         let mut platform_window = cx.platform.open_window(
             handle,
             WindowParams {
@@ -1993,6 +1997,33 @@ impl Window {
         value: AnyWindowFocusListener,
     ) -> (Subscription, impl FnOnce() + use<>) {
         self.focus_listeners.insert((), value)
+    }
+}
+
+fn constrain_window_bounds(
+    window_bounds: WindowBounds,
+    window_min_size: Option<WindowMinSize>,
+) -> WindowBounds {
+    let Some(window_min_size) = window_min_size else {
+        return window_bounds;
+    };
+
+    let constrain = |bounds: Bounds<Pixels>| Bounds {
+        origin: bounds.origin,
+        size: size(
+            window_min_size
+                .width
+                .map_or(bounds.size.width, |width| bounds.size.width.max(width)),
+            window_min_size
+                .height
+                .map_or(bounds.size.height, |height| bounds.size.height.max(height)),
+        ),
+    };
+
+    match window_bounds {
+        WindowBounds::Windowed(bounds) => WindowBounds::Windowed(constrain(bounds)),
+        WindowBounds::Maximized(bounds) => WindowBounds::Maximized(constrain(bounds)),
+        WindowBounds::Fullscreen(bounds) => WindowBounds::Fullscreen(constrain(bounds)),
     }
 }
 
