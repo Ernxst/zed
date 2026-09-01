@@ -1503,39 +1503,6 @@ impl Window {
             },
         )?;
 
-        let tab_bar_visible = platform_window.tab_bar_visible();
-        SystemWindowTabController::init_visible(cx, tab_bar_visible);
-        if let Some(tabs) = platform_window.tabbed_windows() {
-            SystemWindowTabController::add_tab(cx, handle.window_id(), tabs);
-        }
-
-        let display_id = platform_window.display().map(|display| display.id());
-        let sprite_atlas = platform_window.sprite_atlas();
-        let mouse_position = platform_window.mouse_position();
-        let modifiers = platform_window.modifiers();
-        let capslock = platform_window.capslock();
-        let content_size = platform_window.content_size();
-        let scale_factor = platform_window.scale_factor();
-        let appearance = platform_window.appearance();
-        let text_system = Arc::new(WindowTextSystem::new(cx.text_system().clone()));
-        let invalidator = WindowInvalidator::new(handle.window_id());
-        let active = Rc::new(Cell::new(platform_window.is_active()));
-        let hovered = Rc::new(Cell::new(platform_window.is_hovered()));
-        let needs_present = Rc::new(Cell::new(false));
-        let next_frame_callbacks: Rc<RefCell<Vec<FrameCallback>>> = Default::default();
-        let input_rate_tracker = Rc::new(RefCell::new(InputRateTracker::default()));
-        let last_frame_time = Rc::new(Cell::new(None));
-
-        platform_window
-            .request_decorations(window_decorations.unwrap_or(WindowDecorations::Server));
-        platform_window.set_background_appearance(window_background);
-
-        match window_bounds {
-            WindowBounds::Fullscreen(_) => platform_window.toggle_fullscreen(),
-            WindowBounds::Maximized(_) => platform_window.zoom(),
-            WindowBounds::Windowed(_) => {}
-        }
-
         let accessibility_force_disabled = cx.accessibility_force_disabled;
         let a11y_active_flag = Arc::new(AtomicBool::new(false));
 
@@ -1619,6 +1586,41 @@ impl Window {
                 })
                 .detach();
         }
+
+        platform_window
+            .request_decorations(window_decorations.unwrap_or(WindowDecorations::Server));
+        platform_window.set_background_appearance(window_background);
+
+        match window_bounds {
+            WindowBounds::Fullscreen(_) => platform_window.toggle_fullscreen(),
+            WindowBounds::Maximized(_) => platform_window.zoom(),
+            WindowBounds::Windowed(_) => {}
+        }
+
+        platform_window.finish_open()?;
+
+        let tab_bar_visible = platform_window.tab_bar_visible();
+        SystemWindowTabController::init_visible(cx, tab_bar_visible);
+        if let Some(tabs) = platform_window.tabbed_windows() {
+            SystemWindowTabController::add_tab(cx, handle.window_id(), tabs);
+        }
+
+        let display_id = platform_window.display().map(|display| display.id());
+        let sprite_atlas = platform_window.sprite_atlas();
+        let mouse_position = platform_window.mouse_position();
+        let modifiers = platform_window.modifiers();
+        let capslock = platform_window.capslock();
+        let content_size = platform_window.content_size();
+        let scale_factor = platform_window.scale_factor();
+        let appearance = platform_window.appearance();
+        let text_system = Arc::new(WindowTextSystem::new(cx.text_system().clone()));
+        let invalidator = WindowInvalidator::new(handle.window_id());
+        let active = Rc::new(Cell::new(platform_window.is_active()));
+        let hovered = Rc::new(Cell::new(platform_window.is_hovered()));
+        let needs_present = Rc::new(Cell::new(false));
+        let next_frame_callbacks: Rc<RefCell<Vec<FrameCallback>>> = Default::default();
+        let input_rate_tracker = Rc::new(RefCell::new(InputRateTracker::default()));
+        let last_frame_time = Rc::new(Cell::new(None));
 
         platform_window.on_close(Box::new({
             let window_id = handle.window_id();

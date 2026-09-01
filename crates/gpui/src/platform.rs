@@ -959,6 +959,10 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
         Decorations::Server
     }
     fn set_app_id(&mut self, _app_id: &str) {}
+    /// Completes any platform-specific presentation deferred until after accessibility setup.
+    fn finish_open(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
     fn map_window(&mut self) -> anyhow::Result<()> {
         Ok(())
     }

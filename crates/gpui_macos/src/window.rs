@@ -670,8 +670,16 @@ struct MacWindowState {
     activated_least_once: bool,
     closed: Arc<AtomicBool>,
     accesskit_adapter: Option<accesskit_macos::SubclassingAdapter>,
+    initial_presentation: Option<InitialWindowPresentation>,
     // The parent window if this window is a sheet (Dialog kind)
     sheet_parent: Option<id>,
+}
+
+struct InitialWindowPresentation {
+    focus: bool,
+    show: bool,
+    allows_automatic_window_tabbing: bool,
+    top_left: NSPoint,
 }
 
 impl MacWindowState {
@@ -1124,6 +1132,12 @@ impl MacWindow {
                 activated_least_once: false,
                 closed: Arc::new(AtomicBool::new(false)),
                 accesskit_adapter: None,
+                initial_presentation: Some(InitialWindowPresentation {
+                    focus,
+                    show,
+                    allows_automatic_window_tabbing,
+                    top_left: window_rect.origin,
+                }),
                 sheet_parent: None,
             })));
 
@@ -1178,7 +1192,6 @@ impl MacWindow {
             ];
 
             content_view.addSubview_(native_view.autorelease());
-            native_window.makeFirstResponder_(native_view);
 
             let app: id = NSApplication::sharedApplication(nil);
             let main_window: id = msg_send![app, mainWindow];
@@ -1238,59 +1251,12 @@ impl MacWindow {
                                 active_sheet
                             }
                         };
-                        let _: () =
-                            msg_send![parent, beginSheet: native_window completionHandler: nil];
                         sheet_parent = Some(parent);
                     }
                 }
             }
 
-            if allows_automatic_window_tabbing
-                && !main_window.is_null()
-                && main_window != native_window
-            {
-                let main_window_is_fullscreen = main_window
-                    .styleMask()
-                    .contains(NSWindowStyleMask::NSFullScreenWindowMask);
-                let user_tabbing_preference = Self::get_user_tabbing_preference()
-                    .unwrap_or(UserTabbingPreference::InFullScreen);
-                let should_add_as_tab = user_tabbing_preference == UserTabbingPreference::Always
-                    || user_tabbing_preference == UserTabbingPreference::InFullScreen
-                        && main_window_is_fullscreen;
-
-                if should_add_as_tab {
-                    let main_window_can_tab: BOOL =
-                        msg_send![main_window, respondsToSelector: sel!(addTabbedWindow:ordered:)];
-                    let main_window_visible: BOOL = msg_send![main_window, isVisible];
-
-                    if main_window_can_tab == YES && main_window_visible == YES {
-                        let _: () = msg_send![main_window, addTabbedWindow: native_window ordered: NSWindowOrderingMode::NSWindowAbove];
-
-                        // Ensure the window is visible immediately after adding the tab, since the tab bar is updated with a new entry at this point.
-                        // Note: Calling orderFront here can break fullscreen mode (makes fullscreen windows exit fullscreen), so only do this if the main window is not fullscreen.
-                        if !main_window_is_fullscreen {
-                            let _: () = msg_send![native_window, orderFront: nil];
-                        }
-                    }
-                }
-            }
-
-            if focus && show {
-                native_window.makeKeyAndOrderFront_(nil);
-            } else if show {
-                native_window.orderFront_(nil);
-            }
-
-            // Set the initial position of the window to the specified origin.
-            // Although we already specified the position using `initWithContentRect_styleMask_backing_defer_screen_`,
-            // the window position might be incorrect if the main screen (the screen that contains the window that has focus)
-            //  is different from the primary screen.
-            NSWindow::setFrameTopLeftPoint_(native_window, window_rect.origin);
-            {
-                let mut window_state = window.0.lock();
-                window_state.move_traffic_light();
-                window_state.sheet_parent = sheet_parent;
-            }
+            window.0.lock().sheet_parent = sheet_parent;
 
             if virtual_display_scale_factor.is_some() {
                 update_window_scale_factor(&window.0);
@@ -1694,6 +1660,79 @@ impl PlatformWindow for MacWindow {
     // is_hovered is unused on macOS. See Window::is_window_hovered.
     fn is_hovered(&self) -> bool {
         false
+    }
+
+    fn finish_open(&mut self) -> anyhow::Result<()> {
+        let (native_window, native_view, sheet_parent, presentation) = {
+            let mut state = self.0.lock();
+            let Some(presentation) = state.initial_presentation.take() else {
+                return Ok(());
+            };
+            (
+                state.native_window,
+                state.native_view.as_ptr() as id,
+                state.sheet_parent,
+                presentation,
+            )
+        };
+
+        unsafe {
+            // AccessKit dynamically subclasses the content view, so GPUI must install its
+            // adapter before this view is first focused, shown, or ordered into a tab group.
+            native_window.makeFirstResponder_(native_view);
+
+            let app: id = NSApplication::sharedApplication(nil);
+            let main_window: id = msg_send![app, mainWindow];
+
+            if let Some(parent) = sheet_parent {
+                let _: () = msg_send![parent, beginSheet: native_window completionHandler: nil];
+            }
+
+            if presentation.allows_automatic_window_tabbing
+                && !main_window.is_null()
+                && main_window != native_window
+            {
+                let main_window_is_fullscreen = main_window
+                    .styleMask()
+                    .contains(NSWindowStyleMask::NSFullScreenWindowMask);
+                let user_tabbing_preference = Self::get_user_tabbing_preference()
+                    .unwrap_or(UserTabbingPreference::InFullScreen);
+                let should_add_as_tab = user_tabbing_preference == UserTabbingPreference::Always
+                    || user_tabbing_preference == UserTabbingPreference::InFullScreen
+                        && main_window_is_fullscreen;
+
+                if should_add_as_tab {
+                    let main_window_can_tab: BOOL =
+                        msg_send![main_window, respondsToSelector: sel!(addTabbedWindow:ordered:)];
+                    let main_window_visible: BOOL = msg_send![main_window, isVisible];
+
+                    if main_window_can_tab == YES && main_window_visible == YES {
+                        let _: () = msg_send![main_window, addTabbedWindow: native_window ordered: NSWindowOrderingMode::NSWindowAbove];
+
+                        // Ensure the window is visible immediately after adding the tab, since the tab bar is updated with a new entry at this point.
+                        // Note: Calling orderFront here can break fullscreen mode (makes fullscreen windows exit fullscreen), so only do this if the main window is not fullscreen.
+                        if !main_window_is_fullscreen {
+                            let _: () = msg_send![native_window, orderFront: nil];
+                        }
+                    }
+                }
+            }
+
+            if presentation.focus && presentation.show {
+                native_window.makeKeyAndOrderFront_(nil);
+            } else if presentation.show {
+                native_window.orderFront_(nil);
+            }
+
+            // Set the initial position of the window to the specified origin.
+            // Although we already specified the position using `initWithContentRect_styleMask_backing_defer_screen_`,
+            // the window position might be incorrect if the main screen (the screen that contains the window that has focus)
+            //  is different from the primary screen.
+            NSWindow::setFrameTopLeftPoint_(native_window, presentation.top_left);
+        }
+        self.0.lock().move_traffic_light();
+
+        Ok(())
     }
 
     fn set_title(&mut self, title: &str) {
@@ -2220,15 +2259,21 @@ impl PlatformWindow for MacWindow {
         };
         let action_handler = A11yActionHandler(callbacks.action);
 
-        let adapter = unsafe {
+        let mut adapter = unsafe {
             accesskit_macos::SubclassingAdapter::for_window(
                 lock.native_window as *mut c_void,
                 activation_handler,
                 action_handler,
             )
         };
+        let is_key_window = unsafe { lock.native_window.isKeyWindow() == YES };
+        let events = adapter.update_view_focus_state(is_key_window);
 
         lock.accesskit_adapter = Some(adapter);
+        drop(lock);
+        if let Some(events) = events {
+            events.raise();
+        }
     }
 
     fn a11y_tree_update(&self, tree_update: accesskit::TreeUpdate) {
