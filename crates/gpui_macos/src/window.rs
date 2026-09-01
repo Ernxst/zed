@@ -402,6 +402,15 @@ unsafe fn build_window_class(name: &'static str, superclass: &Class) -> *const C
         decl.add_ivar::<*mut c_void>(WINDOW_STATE_IVAR);
         decl.add_method(sel!(dealloc), dealloc_window as extern "C" fn(&Object, Sel));
 
+        // AccessKit owns the focused descendant on the content view. Forward the
+        // key window's query there so assistive technology sees the same node as
+        // the focus-change notification it just received. Inactive windows have
+        // no application focus and must not activate their accessibility trees.
+        decl.add_method(
+            sel!(accessibilityFocusedUIElement),
+            accessibility_focused_ui_element as extern "C" fn(&Object, Sel) -> id,
+        );
+
         decl.add_method(
             sel!(canBecomeMainWindow),
             yes as extern "C" fn(&Object, Sel) -> BOOL,
@@ -516,6 +525,22 @@ unsafe fn build_window_class(name: &'static str, superclass: &Class) -> *const C
         );
 
         decl.register()
+    }
+}
+
+extern "C" fn accessibility_focused_ui_element(this: &Object, _: Sel) -> id {
+    unsafe {
+        let is_key_window: BOOL = msg_send![this, isKeyWindow];
+        if is_key_window == NO {
+            return nil;
+        }
+
+        let content_view: id = msg_send![this, contentView];
+        if content_view == nil {
+            nil
+        } else {
+            msg_send![content_view, accessibilityFocusedUIElement]
+        }
     }
 }
 
@@ -3689,6 +3714,20 @@ extern "C" fn toggle_tab_bar(this: &Object, _sel: Sel, _id: id) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_classes_forward_accessibility_focus_to_content_view() {
+        for class_name in ["GPUIWindow", "GPUIPanel"] {
+            let class = Class::get(class_name).expect("GPUI window class should be registered");
+            assert!(
+                class
+                    .instance_methods()
+                    .iter()
+                    .any(|method| method.name() == sel!(accessibilityFocusedUIElement)),
+                "{class_name} must declare an accessibility focus forwarder"
+            );
+        }
+    }
 
     #[test]
     fn display_id_for_screen_returns_none_for_null_screen() {
