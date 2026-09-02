@@ -1384,6 +1384,23 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Mark this element as a live region, so assistive technology announces
+    /// changes to its content without moving focus.
+    ///
+    /// The politeness is inherited by descendants, so the node whose text
+    /// actually changes does not have to carry it.
+    fn aria_live(mut self, live: accesskit::Live) -> Self {
+        self.interactivity().aria.live = Some(live);
+        self
+    }
+
+    /// Set whether assistive technology presents the whole live region rather
+    /// than only the part of it that changed.
+    fn aria_atomic(mut self, atomic: bool) -> Self {
+        self.interactivity().aria.live_atomic = Some(atomic);
+        self
+    }
+
     /// Set the expanded state for this element.
     fn aria_expanded(mut self, expanded: bool) -> Self {
         self.interactivity().aria.expanded = Some(expanded);
@@ -2072,6 +2089,8 @@ pub(crate) struct AriaProperties {
     pub(crate) keyshortcuts: Option<SharedString>,
     pub(crate) selected: Option<bool>,
     pub(crate) current: Option<accesskit::AriaCurrent>,
+    pub(crate) live: Option<accesskit::Live>,
+    pub(crate) live_atomic: Option<bool>,
     pub(crate) expanded: Option<bool>,
     pub(crate) disabled: Option<bool>,
     pub(crate) toggled: Option<accesskit::Toggled>,
@@ -3568,6 +3587,16 @@ impl Interactivity {
         }
         if let Some(current) = self.aria.current {
             node.set_aria_current(current);
+        }
+        if let Some(live) = self.aria.live {
+            node.set_live(live);
+        }
+        if let Some(atomic) = self.aria.live_atomic {
+            if atomic {
+                node.set_live_atomic();
+            } else {
+                node.clear_live_atomic();
+            }
         }
         if let Some(expanded) = self.aria.expanded {
             node.set_expanded(expanded);
@@ -5661,6 +5690,37 @@ mod tests {
         assert_eq!(node.numeric_value_step(), Some(1.0));
         assert!(node.is_disabled());
         assert_eq!(node.aria_current(), Some(accesskit::AriaCurrent::Page));
+    }
+
+    #[test]
+    fn test_aria_live_builders_write_live_region_properties() {
+        let mut element = div()
+            .id("save-status")
+            .aria_live(accesskit::Live::Polite)
+            .aria_atomic(true);
+        let mut node = accesskit::Node::new(accesskit::Role::Status);
+
+        element.interactivity().write_a11y_info(&mut node);
+
+        assert_eq!(node.live(), Some(accesskit::Live::Polite));
+        assert!(node.is_live_atomic());
+    }
+
+    #[test]
+    fn test_write_a11y_info_clears_live_atomic_when_set_to_false() {
+        // `LiveAtomic` is a flag, so "atomic=false" and "unset" are the same
+        // node state. Writing false must still clear a flag an earlier caller
+        // set rather than leave it standing.
+        let mut interactivity = Interactivity::default();
+        interactivity.aria.live = Some(accesskit::Live::Assertive);
+        interactivity.aria.live_atomic = Some(false);
+
+        let mut node = accesskit::Node::new(accesskit::Role::Alert);
+        node.set_live_atomic();
+        interactivity.write_a11y_info(&mut node);
+
+        assert_eq!(node.live(), Some(accesskit::Live::Assertive));
+        assert!(!node.is_live_atomic());
     }
 
     /// Two focusable, clickable elements ("a" and "b") used to exercise the

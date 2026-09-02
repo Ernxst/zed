@@ -265,6 +265,12 @@ fn node_to_json(
     if let Some(v) = node.aria_current() {
         aria.insert("current".into(), json!(format!("{v:?}")));
     }
+    if let Some(v) = node.live() {
+        aria.insert("live".into(), json!(format!("{v:?}")));
+    }
+    if node.is_live_atomic() {
+        aria.insert("live_atomic".into(), json!(true));
+    }
     if let Some(v) = node.is_expanded() {
         aria.insert("expanded".into(), json!(v));
     }
