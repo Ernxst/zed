@@ -59,6 +59,24 @@ impl PlatformAtlas for MetalAtlas {
         }
     }
 
+    fn update(
+        &self,
+        key: &AtlasKey,
+        size: Size<DevicePixels>,
+        bytes: &[u8],
+    ) -> Result<Option<AtlasTile>> {
+        let lock = self.0.lock();
+        if let Some(tile) = lock.tiles_by_key.get(key).copied() {
+            if tile.bounds.size == size {
+                lock.texture(tile.texture_id).upload(tile.bounds, bytes);
+                return Ok(Some(tile));
+            }
+        }
+        drop(lock);
+        self.remove(key);
+        self.get_or_insert_with(key, &mut || Ok(Some((size, Cow::Borrowed(bytes)))))
+    }
+
     fn remove(&self, key: &AtlasKey) {
         let mut lock = self.0.lock();
         let Some(tile) = lock.tiles_by_key.remove(key) else {
@@ -298,6 +316,26 @@ mod tests {
             })
             .expect("allocation should succeed")
             .expect("callback returns Some")
+    }
+
+    #[test]
+    fn test_update_reuses_same_sized_tile() {
+        let Some(atlas) = create_atlas() else {
+            return;
+        };
+        let image_size = Size {
+            width: DevicePixels(2),
+            height: DevicePixels(1),
+        };
+        let key = make_image_key(1, 0);
+        let initial_tile = insert_tile(&atlas, &key, image_size);
+
+        let updated_tile = atlas
+            .update(&key, image_size, &[0, 0, 0, 255, 255, 255, 255, 255])
+            .expect("upload should succeed")
+            .expect("tile should exist");
+
+        assert_eq!(updated_tile, initial_tile);
     }
 
     #[test]
