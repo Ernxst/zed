@@ -3508,19 +3508,31 @@ impl CalcLength {
         Arc::as_ptr(&self.0).cast()
     }
 
-    pub(crate) fn resolve(&self, basis: f32, rem_size: Pixels) -> f32 {
+    /// Resolves the expression in Taffy's scaled coordinate space.
+    ///
+    /// Taffy lays out in device pixels: every length in a style is multiplied
+    /// by `scale_factor` on the way in, so the `basis` a percentage term
+    /// resolves against arrives scaled. Absolute atoms are stored in logical
+    /// pixels and must be scaled here too, or a `calc()` mixing `px` with `%`
+    /// comes out off by the scale factor on any hidpi window.
+    pub(crate) fn resolve(&self, basis: f32, rem_size: Pixels, scale_factor: f32) -> f32 {
         match self.0.as_ref() {
-            CalcLengthExpr::Absolute(length) => length.to_pixels(rem_size).0,
+            CalcLengthExpr::Absolute(length) => length.to_pixels(rem_size).0 * scale_factor,
             CalcLengthExpr::Fraction(fraction) => basis * fraction,
             CalcLengthExpr::Add(left, right) => {
-                left.resolve(basis, rem_size) + right.resolve(basis, rem_size)
+                left.resolve(basis, rem_size, scale_factor)
+                    + right.resolve(basis, rem_size, scale_factor)
             }
             CalcLengthExpr::Subtract(left, right) => {
-                left.resolve(basis, rem_size) - right.resolve(basis, rem_size)
+                left.resolve(basis, rem_size, scale_factor)
+                    - right.resolve(basis, rem_size, scale_factor)
             }
-            CalcLengthExpr::Clamp(min, preferred, max) => preferred
-                .resolve(basis, rem_size)
-                .clamp(min.resolve(basis, rem_size), max.resolve(basis, rem_size)),
+            CalcLengthExpr::Clamp(min, preferred, max) => {
+                preferred.resolve(basis, rem_size, scale_factor).clamp(
+                    min.resolve(basis, rem_size, scale_factor),
+                    max.resolve(basis, rem_size, scale_factor),
+                )
+            }
         }
     }
 }
@@ -4056,6 +4068,26 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calc_length_resolves_absolute_atoms_in_taffy_scale() {
+        // Taffy supplies a scale-multiplied basis, so absolute atoms must be
+        // scaled the same way: calc(50% - 20px) against a 400-logical-pixel
+        // containing block at scale 2 is 360 device pixels (180 logical), not
+        // 380 (190 logical).
+        let calc = CalcLength::subtract(CalcLength::relative(0.5), CalcLength::absolute(px(20.0)));
+        assert_eq!(calc.resolve(800.0, px(16.0), 2.0), 360.0);
+        assert_eq!(calc.resolve(400.0, px(16.0), 1.0), 180.0);
+
+        // clamp(80px, 100%, 160px) in a 300-logical block at scale 2 clamps
+        // the 600-device basis to the scaled 320-device maximum (160 logical).
+        let clamp = CalcLength::clamp(
+            CalcLength::absolute(px(80.0)),
+            CalcLength::relative(1.0),
+            CalcLength::absolute(px(160.0)),
+        );
+        assert_eq!(clamp.resolve(600.0, px(16.0), 2.0), 320.0);
+    }
 
     #[test]
     fn test_bounds_intersects() {

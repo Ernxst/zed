@@ -286,7 +286,9 @@ impl LayoutPartialTree for LayoutRun<'_> {
             // Every current caller builds expressions from pixels. Use the
             // default rem only for GPUI callers that opt into rem expressions
             // before the layout engine has a per-node rem metric.
-            .map_or(0.0, |length| length.resolve(basis, crate::px(16.0)))
+            .map_or(0.0, |length| {
+                length.resolve(basis, crate::px(16.0), self.scale_factor)
+            })
     }
 
     fn set_unrounded_layout(&mut self, node_id: NodeId, layout: &Layout) {
