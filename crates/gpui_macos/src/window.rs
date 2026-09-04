@@ -78,6 +78,10 @@ const WINDOW_STATE_IVAR: &str = "windowState";
 
 static mut WINDOW_CLASS: *const Class = ptr::null();
 static mut PANEL_CLASS: *const Class = ptr::null();
+/// `WINDOW_CLASS` for visual tests, which keeps the frame it is given instead of
+/// letting AppKit clamp it to a real screen. Only windows opened through
+/// `open_window_for_visual_test` use it, so no window a user sees changes shape.
+static mut VISUAL_TEST_WINDOW_CLASS: *const Class = ptr::null();
 static mut VIEW_CLASS: *const Class = ptr::null();
 static mut BLURRED_VIEW_CLASS: *const Class = ptr::null();
 
@@ -164,8 +168,10 @@ unsafe extern "C" {
 #[ctor(unsafe)]
 unsafe fn build_classes() {
     unsafe {
-        WINDOW_CLASS = build_window_class("GPUIWindow", class!(NSWindow));
-        PANEL_CLASS = build_window_class("GPUIPanel", class!(NSPanel));
+        WINDOW_CLASS = build_window_class("GPUIWindow", class!(NSWindow), false);
+        PANEL_CLASS = build_window_class("GPUIPanel", class!(NSPanel), false);
+        VISUAL_TEST_WINDOW_CLASS =
+            build_window_class("GPUIVisualTestWindow", class!(NSWindow), true);
         VIEW_CLASS = {
             let mut decl = ClassDecl::new("GPUIView", class!(NSView)).unwrap();
             decl.add_ivar::<*mut c_void>(WINDOW_STATE_IVAR);
@@ -396,11 +402,22 @@ pub(crate) unsafe fn set_active_window_cursor_style(style: CursorStyle) {
     }
 }
 
-unsafe fn build_window_class(name: &'static str, superclass: &Class) -> *const Class {
+unsafe fn build_window_class(
+    name: &'static str,
+    superclass: &Class,
+    unconstrained_frame: bool,
+) -> *const Class {
     unsafe {
         let mut decl = ClassDecl::new(name, superclass).unwrap();
         decl.add_ivar::<*mut c_void>(WINDOW_STATE_IVAR);
         decl.add_method(sel!(dealloc), dealloc_window as extern "C" fn(&Object, Sel));
+
+        if unconstrained_frame {
+            decl.add_method(
+                sel!(constrainFrameRect:toScreen:),
+                unconstrained_frame_rect as extern "C" fn(&Object, Sel, NSRect, id) -> NSRect,
+            );
+        }
 
         // AccessKit owns the focused descendant on the content view. Forward the
         // key window's query there so assistive technology sees the same node as
@@ -1068,6 +1085,11 @@ impl MacWindow {
             );
 
             let native_window: id = match kind {
+                // A visual test opens exactly one window, and it is this kind, so
+                // the unconstrained class is reachable only from that path.
+                WindowKind::Normal if virtual_display_bounds.is_some() => {
+                    msg_send![VISUAL_TEST_WINDOW_CLASS, alloc]
+                }
                 WindowKind::Normal => msg_send![WINDOW_CLASS, alloc],
                 // `AnchoredPopup` is rejected in `MacPlatform::open_window`, grouped here only
                 // for exhaustiveness.
@@ -2405,6 +2427,15 @@ extern "C" fn dealloc_window(this: &Object, _: Sel) {
         drop_window_state(this);
         let _: () = msg_send![super(this, class!(NSWindow)), dealloc];
     }
+}
+
+/// AppKit shrinks a titled window until its title bar sits inside the target
+/// screen's visible frame. A visual test window is deliberately parked far off
+/// screen and sized from a virtual display, so that clamp would silently hand it
+/// the host's geometry instead of the requested one. Only `GPUIVisualTestWindow`
+/// answers this; every other GPUI window keeps AppKit's implementation.
+extern "C" fn unconstrained_frame_rect(_: &Object, _: Sel, frame: NSRect, _: id) -> NSRect {
+    frame
 }
 
 extern "C" fn dealloc_view(this: &Object, _: Sel) {
