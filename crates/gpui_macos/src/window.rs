@@ -78,9 +78,12 @@ const WINDOW_STATE_IVAR: &str = "windowState";
 
 static mut WINDOW_CLASS: *const Class = ptr::null();
 static mut PANEL_CLASS: *const Class = ptr::null();
-/// `WINDOW_CLASS` for visual tests, which keeps the frame it is given instead of
-/// letting AppKit clamp it to a real screen. Only windows opened through
-/// `open_window_for_visual_test` use it, so no window a user sees changes shape.
+/// A `WINDOW_CLASS` subclass for visual tests, which keeps the frame it is given
+/// instead of letting AppKit clamp it to a real screen. Only windows opened
+/// through `open_window_for_visual_test` use it, so no window a user sees
+/// changes shape, and being a subclass keeps it a `GPUIWindow` everywhere the
+/// platform tests one.
+#[cfg(any(test, feature = "test-support"))]
 static mut VISUAL_TEST_WINDOW_CLASS: *const Class = ptr::null();
 static mut VIEW_CLASS: *const Class = ptr::null();
 static mut BLURRED_VIEW_CLASS: *const Class = ptr::null();
@@ -168,10 +171,21 @@ unsafe extern "C" {
 #[ctor(unsafe)]
 unsafe fn build_classes() {
     unsafe {
-        WINDOW_CLASS = build_window_class("GPUIWindow", class!(NSWindow), false);
-        PANEL_CLASS = build_window_class("GPUIPanel", class!(NSPanel), false);
-        VISUAL_TEST_WINDOW_CLASS =
-            build_window_class("GPUIVisualTestWindow", class!(NSWindow), true);
+        WINDOW_CLASS = build_window_class("GPUIWindow", class!(NSWindow));
+        PANEL_CLASS = build_window_class("GPUIPanel", class!(NSPanel));
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            // A subclass of the class just registered, so it inherits the state
+            // ivar, the delegate methods, and the accessibility forwarder, and
+            // so `isKindOfClass: GPUIWindow` keeps recognising it. The only
+            // difference is the frame constraint.
+            let mut decl = ClassDecl::new("GPUIVisualTestWindow", &*WINDOW_CLASS).unwrap();
+            decl.add_method(
+                sel!(constrainFrameRect:toScreen:),
+                unconstrained_frame_rect as extern "C" fn(&Object, Sel, NSRect, id) -> NSRect,
+            );
+            VISUAL_TEST_WINDOW_CLASS = decl.register();
+        }
         VIEW_CLASS = {
             let mut decl = ClassDecl::new("GPUIView", class!(NSView)).unwrap();
             decl.add_ivar::<*mut c_void>(WINDOW_STATE_IVAR);
@@ -402,22 +416,11 @@ pub(crate) unsafe fn set_active_window_cursor_style(style: CursorStyle) {
     }
 }
 
-unsafe fn build_window_class(
-    name: &'static str,
-    superclass: &Class,
-    unconstrained_frame: bool,
-) -> *const Class {
+unsafe fn build_window_class(name: &'static str, superclass: &Class) -> *const Class {
     unsafe {
         let mut decl = ClassDecl::new(name, superclass).unwrap();
         decl.add_ivar::<*mut c_void>(WINDOW_STATE_IVAR);
         decl.add_method(sel!(dealloc), dealloc_window as extern "C" fn(&Object, Sel));
-
-        if unconstrained_frame {
-            decl.add_method(
-                sel!(constrainFrameRect:toScreen:),
-                unconstrained_frame_rect as extern "C" fn(&Object, Sel, NSRect, id) -> NSRect,
-            );
-        }
 
         // AccessKit owns the focused descendant on the content view. Forward the
         // key window's query there so assistive technology sees the same node as
@@ -1085,12 +1088,9 @@ impl MacWindow {
             );
 
             let native_window: id = match kind {
-                // A visual test opens exactly one window, and it is this kind, so
-                // the unconstrained class is reachable only from that path.
-                WindowKind::Normal if virtual_display_bounds.is_some() => {
-                    msg_send![VISUAL_TEST_WINDOW_CLASS, alloc]
+                WindowKind::Normal => {
+                    msg_send![normal_window_class(virtual_display_bounds), alloc]
                 }
-                WindowKind::Normal => msg_send![WINDOW_CLASS, alloc],
                 // `AnchoredPopup` is rejected in `MacPlatform::open_window`, grouped here only
                 // for exhaustiveness.
                 WindowKind::PopUp
@@ -2433,9 +2433,29 @@ extern "C" fn dealloc_window(this: &Object, _: Sel) {
 /// screen's visible frame. A visual test window is deliberately parked far off
 /// screen and sized from a virtual display, so that clamp would silently hand it
 /// the host's geometry instead of the requested one. Only `GPUIVisualTestWindow`
-/// answers this; every other GPUI window keeps AppKit's implementation.
+/// answers this; every other GPUI window keeps AppKit's implementation, which is
+/// reached by not overriding it rather than by calling `super` from here.
+#[cfg(any(test, feature = "test-support"))]
 extern "C" fn unconstrained_frame_rect(_: &Object, _: Sel, frame: NSRect, _: id) -> NSRect {
     frame
+}
+
+/// The class a `WindowKind::Normal` window is allocated from: the unconstrained
+/// subclass for a visual test, `GPUIWindow` for everything else.
+#[cfg(any(test, feature = "test-support"))]
+unsafe fn normal_window_class(virtual_display_bounds: Option<Bounds<Pixels>>) -> *const Class {
+    unsafe {
+        if virtual_display_bounds.is_some() {
+            VISUAL_TEST_WINDOW_CLASS
+        } else {
+            WINDOW_CLASS
+        }
+    }
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+unsafe fn normal_window_class(_: Option<Bounds<Pixels>>) -> *const Class {
+    unsafe { WINDOW_CLASS }
 }
 
 extern "C" fn dealloc_view(this: &Object, _: Sel) {
@@ -3748,16 +3768,42 @@ mod tests {
 
     #[test]
     fn window_classes_forward_accessibility_focus_to_content_view() {
-        for class_name in ["GPUIWindow", "GPUIPanel"] {
+        // Resolved rather than declared, because `GPUIVisualTestWindow`
+        // deliberately inherits the forwarder from `GPUIWindow`.
+        for class_name in ["GPUIWindow", "GPUIPanel", "GPUIVisualTestWindow"] {
             let class = Class::get(class_name).expect("GPUI window class should be registered");
             assert!(
                 class
-                    .instance_methods()
-                    .iter()
-                    .any(|method| method.name() == sel!(accessibilityFocusedUIElement)),
-                "{class_name} must declare an accessibility focus forwarder"
+                    .instance_method(sel!(accessibilityFocusedUIElement))
+                    .is_some(),
+                "{class_name} must answer an accessibility focus forwarder"
             );
         }
+    }
+
+    /// The visual test window may differ from `GPUIWindow` in the frame
+    /// constraint and nothing else. Registering it against `NSWindow` instead
+    /// would drop the state ivar and the delegate methods, and would take it out
+    /// of every `isKindOfClass: GPUIWindow` check the platform makes — window
+    /// stack, ordered windows, tabbed windows, cursor style.
+    #[test]
+    fn visual_test_window_class_subclasses_the_gpui_window_class() {
+        let class =
+            Class::get("GPUIVisualTestWindow").expect("registered alongside the other classes");
+        assert_eq!(class.superclass().map(Class::name), Some("GPUIWindow"));
+        assert!(
+            class.instance_variable(WINDOW_STATE_IVAR).is_some(),
+            "the visual test window must inherit the window state ivar"
+        );
+        assert_eq!(
+            class
+                .instance_methods()
+                .iter()
+                .map(|method| method.name())
+                .collect::<Vec<_>>(),
+            vec![sel!(constrainFrameRect:toScreen:)],
+            "the frame constraint is the only method the visual test window declares"
+        );
     }
 
     #[test]
