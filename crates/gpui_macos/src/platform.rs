@@ -20,15 +20,11 @@ use cocoa::{
     },
 };
 use core_foundation::{
-    base::{CFIndex, CFRelease, CFType, CFTypeRef, OSStatus, TCFType},
+    base::{CFRelease, CFType, CFTypeRef, OSStatus, TCFType},
     boolean::CFBoolean,
     data::CFData,
     dictionary::{CFDictionary, CFDictionaryRef, CFMutableDictionary},
-    runloop::{
-        CFRunLoopActivity, CFRunLoopAddObserver, CFRunLoopGetMain, CFRunLoopObserverContext,
-        CFRunLoopObserverCreate, CFRunLoopObserverRef, CFRunLoopRemoveObserver, CFRunLoopRun,
-        kCFRunLoopBeforeWaiting, kCFRunLoopCommonModes,
-    },
+    runloop::{CFRunLoopRun, CFRunLoopRunInMode, kCFRunLoopDefaultMode},
     string::{CFString, CFStringRef},
 };
 use ctor::ctor;
@@ -339,7 +335,7 @@ impl MacPlatform {
 
         unsafe {
             let pool = NSAutoreleasePool::new(nil);
-            run_app_through_wake();
+            pump_app_nonblocking();
             pool.drain();
         }
 
@@ -692,40 +688,28 @@ fn assert_main_thread(operation: &str) {
     );
 }
 
-unsafe fn run_app_through_wake() {
-    // GPUI frame ticks use a main-queue source, which only runs after the run loop wakes.
-    // Pre-posting an event makes the pump non-blocking. Stop when that work drains and
-    // the run loop is about to wait, whether or not this iteration actually slept.
-    extern "C" fn observe_run_loop(_: CFRunLoopObserverRef, _: CFRunLoopActivity, _: *mut c_void) {
-        unsafe { stop_app_immediately() };
-    }
-
+unsafe fn pump_app_nonblocking() {
     unsafe {
-        let run_loop = CFRunLoopGetMain();
-        let mut context = CFRunLoopObserverContext {
-            version: 0,
-            info: ptr::null_mut(),
-            retain: None,
-            release: None,
-            copyDescription: None,
-        };
-        let observer = CFRunLoopObserverCreate(
-            ptr::null(),
-            kCFRunLoopBeforeWaiting,
-            0,
-            CFIndex::MIN,
-            observe_run_loop,
-            &mut context,
-        );
-        assert!(!observer.is_null(), "failed to create AppKit pump observer");
-        CFRunLoopAddObserver(run_loop, observer, kCFRunLoopCommonModes);
-
-        post_wake_event();
+        // NSApplication::run sleeps until the next display-link wake, which
+        // blocks embedded hosts. Drain only work that is ready now.
         let app: id = msg_send![APP_CLASS, sharedApplication];
-        app.run();
+        let distant_past: id = msg_send![class!(NSDate), distantPast];
+        let mode = kCFRunLoopDefaultMode as id;
 
-        CFRunLoopRemoveObserver(run_loop, observer, kCFRunLoopCommonModes);
-        CFRelease(observer as CFTypeRef);
+        for _ in 0..256 {
+            let event: id = msg_send![app,
+                nextEventMatchingMask: NSUInteger::MAX
+                untilDate: distant_past
+                inMode: mode
+                dequeue: YES
+            ];
+            if event == nil {
+                break;
+            }
+            let _: () = msg_send![app, sendEvent: event];
+        }
+        let _: () = msg_send![app, updateWindows];
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, 1);
     }
 }
 
