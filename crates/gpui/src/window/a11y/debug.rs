@@ -233,6 +233,9 @@ fn node_to_json(
     }
 
     // String properties.
+    if let Some(v) = node.author_id() {
+        aria.insert("author_id".into(), json!(v));
+    }
     if let Some(v) = node.label() {
         aria.insert("label".into(), json!(v));
     }

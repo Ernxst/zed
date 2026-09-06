@@ -6235,6 +6235,14 @@ impl Window {
         self.a11y.debug_tree_json()
     }
 
+    /// Pretend a screen reader is connected so the next frame builds an
+    /// accessibility tree. Visual tests have no VoiceOver / UIA client, so
+    /// without this `debug_a11y_tree_json` stays empty.
+    pub fn set_a11y_active_for_tests(&mut self, active: bool) {
+        self.a11y.set_active_for_tests(active);
+        self.refresh();
+    }
+
     /// Register a listener for an accessibility action on a specific node.
     /// The listener will be called when a screen reader requests the given
     /// action on the node identified by `node_id`.

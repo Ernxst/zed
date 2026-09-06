@@ -213,6 +213,15 @@ impl A11y {
         self.active_this_frame = !self.force_disabled && self.active_flag.load(Ordering::SeqCst);
     }
 
+    /// Pretend a screen reader is connected. Tests need this because AccessKit
+    /// only sets the active flag when a platform client attaches.
+    pub(crate) fn set_active_for_tests(&mut self, active: bool) {
+        if self.force_disabled {
+            return;
+        }
+        self.active_flag.store(active, Ordering::SeqCst);
+    }
+
     pub(crate) fn is_active(&self) -> bool {
         self.active_this_frame
     }
