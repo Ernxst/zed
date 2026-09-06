@@ -9,9 +9,9 @@
 
 use crate::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, DispatchPhase, Edges, Element, EntityId,
-    FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
-    Overflow, Pixels, Point, ScrollDelta, ScrollWheelEvent, Size, Style, StyleRefinement, Styled,
-    Window, point, px, size,
+    FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, InteractiveElement,
+    Interactivity, IntoElement, Overflow, Pixels, Point, ScrollDelta, ScrollWheelEvent, Size,
+    StatefulInteractiveElement, Style, StyleRefinement, Styled, Window, point, px, size,
 };
 use collections::VecDeque;
 use refineable::Refineable as _;
@@ -30,6 +30,7 @@ pub fn list(
         render_item: Box::new(render_item),
         style: StyleRefinement::default(),
         sizing_behavior: ListSizingBehavior::default(),
+        interactivity: Interactivity::new(),
     }
 }
 
@@ -39,6 +40,7 @@ pub struct List {
     render_item: Box<RenderItemFn>,
     style: StyleRefinement,
     sizing_behavior: ListSizingBehavior,
+    interactivity: Interactivity,
 }
 
 impl List {
@@ -1471,11 +1473,21 @@ impl Element for List {
     type PrepaintState = ListPrepaintState;
 
     fn id(&self) -> Option<crate::ElementId> {
-        None
+        self.interactivity.element_id.clone()
     }
 
     fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
-        None
+        self.interactivity.source_location()
+    }
+
+    fn a11y_role(&self) -> Option<accesskit::Role> {
+        self.interactivity
+            .override_role
+            .filter(|role| *role != accesskit::Role::GenericContainer)
+    }
+
+    fn write_a11y_info(&self, node: &mut accesskit::Node) {
+        self.interactivity.write_a11y_info(node);
     }
 
     fn request_layout(
@@ -1665,6 +1677,14 @@ impl Styled for List {
         &mut self.style
     }
 }
+
+impl InteractiveElement for List {
+    fn interactivity(&mut self) -> &mut Interactivity {
+        &mut self.interactivity
+    }
+}
+
+impl StatefulInteractiveElement for List {}
 
 impl sum_tree::Item for ListItem {
     type Summary = ListItemSummary;
