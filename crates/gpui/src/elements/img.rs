@@ -274,6 +274,16 @@ impl Element for Img {
         self.interactivity.source_location()
     }
 
+    fn a11y_role(&self) -> Option<accesskit::Role> {
+        self.interactivity
+            .override_role
+            .filter(|role| *role != accesskit::Role::GenericContainer)
+    }
+
+    fn write_a11y_info(&self, node: &mut accesskit::Node) {
+        self.interactivity.write_a11y_info(node);
+    }
+
     fn request_layout(
         &mut self,
         global_id: Option<&GlobalElementId>,
