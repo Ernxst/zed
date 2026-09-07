@@ -182,6 +182,57 @@ impl TabStopMap {
         cursor.item()
     }
 
+    pub fn next_among(
+        &self,
+        focused_id: Option<&FocusId>,
+        allowed: impl FnMut(&FocusId) -> bool,
+    ) -> Option<FocusHandle> {
+        self.among(focused_id, allowed, true)
+    }
+
+    pub fn prev_among(
+        &self,
+        focused_id: Option<&FocusId>,
+        allowed: impl FnMut(&FocusId) -> bool,
+    ) -> Option<FocusHandle> {
+        self.among(focused_id, allowed, false)
+    }
+
+    fn among(
+        &self,
+        focused_id: Option<&FocusId>,
+        mut allowed: impl FnMut(&FocusId) -> bool,
+        forward: bool,
+    ) -> Option<FocusHandle> {
+        let start_allowed = focused_id.is_some_and(|id| allowed(id));
+        let mut current = if start_allowed {
+            if forward {
+                self.next(focused_id)
+            } else {
+                self.prev(focused_id)
+            }
+        } else if forward {
+            self.next(None)
+        } else {
+            self.prev(None)
+        };
+        let first = current.as_ref().map(|handle| handle.id);
+        while let Some(handle) = current {
+            if allowed(&handle.id) {
+                return Some(handle);
+            }
+            current = if forward {
+                self.next(Some(&handle.id))
+            } else {
+                self.prev(Some(&handle.id))
+            };
+            if current.as_ref().map(|next| next.id) == first {
+                break;
+            }
+        }
+        None
+    }
+
     pub fn replay(&mut self, nodes: &[TabStopOperation]) {
         for node in nodes {
             match node {
@@ -405,6 +456,32 @@ mod tests {
         assert_eq!(
             tab_index_map.prev(Some(&expected[4].id)),
             Some(expected[3].clone())
+        );
+
+        let allowed = |id: &FocusId| id == &expected[1].id || id == &expected[3].id;
+        assert_eq!(
+            tab_index_map
+                .next_among(Some(&expected[1].id), allowed)
+                .map(|handle| handle.id),
+            Some(expected[3].id)
+        );
+        assert_eq!(
+            tab_index_map
+                .next_among(Some(&expected[3].id), allowed)
+                .map(|handle| handle.id),
+            Some(expected[1].id)
+        );
+        assert_eq!(
+            tab_index_map
+                .prev_among(Some(&expected[1].id), allowed)
+                .map(|handle| handle.id),
+            Some(expected[3].id)
+        );
+        assert_eq!(
+            tab_index_map
+                .next_among(None, allowed)
+                .map(|handle| handle.id),
+            Some(expected[1].id)
         );
     }
 
