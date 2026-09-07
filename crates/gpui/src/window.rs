@@ -606,6 +606,11 @@ impl FocusHandle {
         self.id.is_focused(window)
     }
 
+    /// The id used by the window's tab-stop map.
+    pub fn id(&self) -> FocusId {
+        self.id
+    }
+
     /// Obtains whether the element associated with this handle contains the focused
     /// element or is itself focused.
     pub fn contains_focused(&self, window: &Window, cx: &App) -> bool {
