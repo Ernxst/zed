@@ -8,7 +8,7 @@ use crate::{
     },
 };
 use collections::{FxHashMap, FxHashSet};
-use std::{fmt::Debug, ops::Range};
+use std::{fmt::Debug, ops::Range, rc::Rc};
 use taffy::{
     Cache, CacheTree, Display, compute_block_layout, compute_cached_layout, compute_flexbox_layout,
     compute_grid_layout, compute_hidden_layout, compute_leaf_layout, compute_root_layout,
@@ -16,7 +16,7 @@ use taffy::{
     style::AvailableSpace as TaffyAvailableSpace,
     tree::{
         Layout, LayoutBlockContainer, LayoutFlexboxContainer, LayoutGridContainer, LayoutInput,
-        LayoutOutput, LayoutPartialTree, NodeId, TraversePartialTree,
+        LayoutOutput, LayoutPartialTree, NodeId, RunMode, TraversePartialTree,
     },
 };
 
@@ -48,16 +48,89 @@ enum NodeContext {
     Fixed(MeasuredLayout),
 }
 
+// Taffy's nine measurement slots omit parent width from slot selection, so a
+// later width can evict an otherwise matching entry. Keep Cache's public key
+// matching and output semantics by partitioning only on x-axis parent width.
+#[derive(Default)]
+struct LayoutCache {
+    primary: Cache,
+    primary_parent_width: Option<u32>,
+    additional: Vec<(u32, Cache)>,
+}
+
+impl LayoutCache {
+    fn parent_width_key(input: &LayoutInput) -> u32 {
+        input.parent_size.width.unwrap_or(f32::INFINITY).to_bits() & 0x7fff_ffff
+    }
+
+    fn get(&self, input: &LayoutInput) -> Option<LayoutOutput> {
+        match input.run_mode {
+            RunMode::PerformLayout => self.primary.get(input),
+            RunMode::ComputeSize => {
+                let parent_width = Self::parent_width_key(input);
+                if self.primary_parent_width == Some(parent_width) {
+                    return self.primary.get(input);
+                }
+                self.additional
+                    .iter()
+                    .find(|(width, _)| *width == parent_width)
+                    .and_then(|(_, cache)| cache.get(input))
+            }
+            RunMode::PerformHiddenLayout => None,
+        }
+    }
+
+    fn store(&mut self, input: &LayoutInput, output: LayoutOutput) {
+        match input.run_mode {
+            RunMode::PerformLayout => self.primary.store(input, output),
+            RunMode::ComputeSize => {
+                let parent_width = Self::parent_width_key(input);
+                match self.primary_parent_width {
+                    None => {
+                        self.primary_parent_width = Some(parent_width);
+                        self.primary.store(input, output);
+                    }
+                    Some(primary_width) if primary_width == parent_width => {
+                        self.primary.store(input, output);
+                    }
+                    Some(_) => {
+                        if let Some((_, cache)) = self
+                            .additional
+                            .iter_mut()
+                            .find(|(width, _)| *width == parent_width)
+                        {
+                            cache.store(input, output);
+                        } else {
+                            let mut cache = Cache::new();
+                            cache.store(input, output);
+                            self.additional.push((parent_width, cache));
+                        }
+                    }
+                }
+            }
+            RunMode::PerformHiddenLayout => {}
+        }
+    }
+
+    fn clear(&mut self) {
+        self.primary.clear();
+        self.primary_parent_width = None;
+        self.additional.clear();
+    }
+}
+
 struct LayoutNode {
-    style: taffy::style::Style,
+    style: Rc<taffy::style::Style>,
     // Taffy's calc encoding retains an aligned pointer. These Arcs keep the
     // expressions alive for the whole layout pass that dereferences it.
     calc_lengths: Vec<CalcLength>,
     children: Vec<NodeId>,
     parent: Option<NodeId>,
     context: Option<NodeContext>,
-    cache: Cache,
+    cache: LayoutCache,
     layout: Layout,
+    #[cfg(test)]
+    uncached_computes: usize,
 }
 
 /// GPUI's Taffy storage and low-level algorithm adaptor.
@@ -85,13 +158,15 @@ impl GpuiTaffyTree {
     ) -> LayoutId {
         let id = NodeId::from(self.nodes.len() as u64);
         self.nodes.push(LayoutNode {
-            style,
+            style: Rc::new(style),
             calc_lengths,
             children: children.iter().map(|child| child.0).collect(),
             parent: None,
             context,
-            cache: Cache::new(),
+            cache: LayoutCache::default(),
             layout: Layout::new(),
+            #[cfg(test)]
+            uncached_computes: 0,
         });
         for child in children {
             self.node_mut(child.0).parent = Some(id);
@@ -120,7 +195,7 @@ impl GpuiTaffyTree {
     }
 
     fn set_style(&mut self, id: NodeId, style: taffy::style::Style) {
-        self.node_mut(id).style = style;
+        self.node_mut(id).style = Rc::new(style);
         self.clear_cache_upwards(id);
     }
 
@@ -191,7 +266,11 @@ impl LayoutRun<'_> {
         }
 
         compute_cached_layout(self, node_id, inputs, |tree, node_id, inputs| {
-            let style = tree.tree.style(node_id).clone();
+            #[cfg(test)]
+            {
+                tree.tree.node_mut(node_id).uncached_computes += 1;
+            }
+            let style = Rc::clone(&tree.tree.node(node_id).style);
             let has_children = tree.child_count(node_id) > 0;
 
             if style.display == Display::None {
@@ -202,7 +281,7 @@ impl LayoutRun<'_> {
                 let mut first_baseline = None;
                 let mut output = compute_leaf_layout(
                     inputs,
-                    &style,
+                    style.as_ref(),
                     |_, _| 0.0,
                     |known_dimensions, available_space| {
                         let known_dimensions = Size {
@@ -1120,7 +1199,10 @@ impl From<Size<Pixels>> for Size<AvailableSpace> {
 mod tests {
     use super::*;
     use crate::px;
-    use taffy::{AlignContent, AlignItems, FlexDirection, FlexWrap, style_helpers::length};
+    use taffy::{
+        AlignContent, AlignItems, FlexDirection, FlexWrap, RequestedAxis, style_helpers::length,
+        tree::SizingMode,
+    };
 
     fn fixed_leaf(
         tree: &mut GpuiTaffyTree,
@@ -1139,6 +1221,188 @@ mod tests {
                 first_baseline: first_baseline.map(Pixels),
             })),
         )
+    }
+
+    fn layout_cache_measure_input(parent_width: Option<f32>) -> LayoutInput {
+        LayoutInput {
+            run_mode: RunMode::ComputeSize,
+            sizing_mode: SizingMode::ContentSize,
+            axis: RequestedAxis::Both,
+            known_dimensions: TaffySize {
+                width: Some(100.),
+                height: None,
+            },
+            parent_size: TaffySize {
+                width: parent_width,
+                height: None,
+            },
+            available_space: TaffySize {
+                width: taffy::style::AvailableSpace::MaxContent,
+                height: taffy::style::AvailableSpace::MaxContent,
+            },
+            ..LayoutInput::HIDDEN
+        }
+    }
+
+    fn layout_cache_perform_input(parent_width: Option<f32>) -> LayoutInput {
+        LayoutInput {
+            run_mode: RunMode::PerformLayout,
+            sizing_mode: SizingMode::InherentSize,
+            axis: RequestedAxis::Both,
+            known_dimensions: TaffySize {
+                width: Some(100.),
+                height: Some(20.),
+            },
+            parent_size: TaffySize {
+                width: parent_width,
+                height: Some(20.),
+            },
+            available_space: TaffySize {
+                width: taffy::style::AvailableSpace::Definite(100.),
+                height: taffy::style::AvailableSpace::Definite(20.),
+            },
+            ..LayoutInput::HIDDEN
+        }
+    }
+
+    fn layout_cache_output(height: f32) -> LayoutOutput {
+        LayoutOutput::from_outer_size(TaffySize {
+            width: 100.,
+            height,
+        })
+    }
+
+    fn layout_cache_full_output(height: f32, baseline: f32) -> LayoutOutput {
+        let mut output = LayoutOutput::from_sizes_and_baselines(
+            TaffySize {
+                width: 100.,
+                height,
+            },
+            TaffySize {
+                width: 80.,
+                height: height - 4.,
+            },
+            TaffyPoint {
+                x: Some(baseline),
+                y: Some(baseline + 1.),
+            },
+        );
+        output.top_margin = taffy::tree::CollapsibleMarginSet::from_margin(3.);
+        output.bottom_margin = taffy::tree::CollapsibleMarginSet::from_margin(-2.);
+        output.margins_can_collapse_through = true;
+        output
+    }
+
+    #[test]
+    fn layout_cache_partitions_compute_size_by_parent_width() {
+        let finite = layout_cache_measure_input(Some(1425.));
+        let unconstrained = layout_cache_measure_input(None);
+        let finite_output = layout_cache_output(11.);
+        let unconstrained_output = layout_cache_output(29.);
+        let mut cache = LayoutCache::default();
+        let mut stock = Cache::new();
+
+        cache.store(&finite, finite_output);
+        stock.store(&finite, finite_output);
+        cache.store(&unconstrained, unconstrained_output);
+        stock.store(&unconstrained, unconstrained_output);
+
+        assert_eq!(cache.get(&finite), Some(finite_output));
+        assert_eq!(cache.get(&unconstrained), Some(unconstrained_output));
+        assert_eq!(stock.get(&finite), None);
+        assert_eq!(stock.get(&unconstrained), Some(unconstrained_output));
+
+        cache.store(&finite, finite_output);
+        stock.store(&finite, finite_output);
+        assert_eq!(cache.get(&finite), Some(finite_output));
+        assert_eq!(cache.get(&unconstrained), Some(unconstrained_output));
+        assert_eq!(stock.get(&finite), Some(finite_output));
+        assert_eq!(stock.get(&unconstrained), None);
+    }
+
+    #[test]
+    fn layout_cache_normalizes_equivalent_parent_widths() {
+        let none = layout_cache_measure_input(None);
+        let infinity = layout_cache_measure_input(Some(f32::INFINITY));
+        let positive_zero = layout_cache_measure_input(Some(0.));
+        let negative_zero = layout_cache_measure_input(Some(-0.));
+        let output = layout_cache_output(13.);
+        let mut cache = LayoutCache::default();
+        let mut stock = Cache::new();
+
+        cache.store(&none, output);
+        stock.store(&none, output);
+        assert_eq!(cache.get(&infinity), stock.get(&infinity));
+
+        cache.store(&positive_zero, output);
+        stock.store(&positive_zero, output);
+        assert_eq!(cache.get(&negative_zero), stock.get(&negative_zero));
+        assert_eq!(cache.additional.len(), 1);
+    }
+
+    #[test]
+    fn layout_cache_matches_stock_within_a_parent_width_partition() {
+        let mut base = layout_cache_measure_input(Some(320.));
+        base.parent_size.height = Some(200.);
+        let mut changed = base;
+        changed.parent_size.height = Some(900.);
+        changed.axis = RequestedAxis::Vertical;
+        changed.available_space.width = taffy::style::AvailableSpace::Definite(42.);
+        let output = layout_cache_output(19.);
+        let mut cache = LayoutCache::default();
+        let mut stock = Cache::new();
+
+        cache.store(&base, output);
+        stock.store(&base, output);
+        assert_eq!(cache.get(&changed), stock.get(&changed));
+    }
+
+    #[test]
+    fn layout_cache_keeps_one_global_perform_layout_entry() {
+        let first = layout_cache_perform_input(Some(100.));
+        let second = layout_cache_perform_input(Some(200.));
+        let first_output = layout_cache_full_output(21., 7.);
+        let second_output = layout_cache_full_output(37., 15.);
+        let mut cache = LayoutCache::default();
+        let mut stock = Cache::new();
+
+        cache.store(&first, first_output);
+        stock.store(&first, first_output);
+        assert_eq!(cache.get(&first), stock.get(&first));
+
+        cache.store(&second, second_output);
+        stock.store(&second, second_output);
+        assert_eq!(cache.get(&first), stock.get(&first));
+        assert_eq!(cache.get(&second), Some(second_output));
+        assert_eq!(cache.get(&second), stock.get(&second));
+    }
+
+    #[test]
+    fn layout_cache_clear_removes_all_modes_and_ignores_hidden_layout() {
+        let measure = layout_cache_measure_input(Some(100.));
+        let other_measure = layout_cache_measure_input(Some(200.));
+        let perform = layout_cache_perform_input(Some(300.));
+        let hidden = LayoutInput::HIDDEN;
+        let output = layout_cache_output(23.);
+        let full_output = layout_cache_full_output(31., 11.);
+        let mut cache = LayoutCache::default();
+
+        cache.store(&measure, output);
+        cache.store(&other_measure, output);
+        cache.store(&perform, full_output);
+        cache.store(&hidden, full_output);
+        assert_eq!(cache.get(&hidden), None);
+        assert!(cache.get(&measure).is_some());
+        assert!(cache.get(&other_measure).is_some());
+        assert!(cache.get(&perform).is_some());
+
+        cache.clear();
+        assert_eq!(cache.get(&measure), None);
+        assert_eq!(cache.get(&other_measure), None);
+        assert_eq!(cache.get(&perform), None);
+        assert_eq!(cache.get(&hidden), None);
+        assert!(cache.primary_parent_width.is_none());
+        assert!(cache.additional.is_empty());
     }
 
     fn fixed_sized_leaf(
@@ -1197,6 +1461,143 @@ mod tests {
 
     fn compute_test_layout(tree: &mut GpuiTaffyTree, root: LayoutId) {
         compute_test_layout_at_scale(tree, root, 1.);
+    }
+
+    fn fixed_intrinsic_leaf(tree: &mut GpuiTaffyTree, width: f32, height: f32) -> LayoutId {
+        tree.new_node(
+            taffy::style::Style::default(),
+            Vec::new(),
+            &[],
+            Some(NodeContext::Fixed(MeasuredLayout {
+                size: size(Pixels(width), Pixels(height)),
+                first_baseline: None,
+            })),
+        )
+    }
+
+    fn nested_layout_cell(
+        tree: &mut GpuiTaffyTree,
+        intrinsic_width: f32,
+        width: Option<f32>,
+        min_width: Option<f32>,
+        flex_grow: f32,
+        flex_shrink: f32,
+        flex_basis: Option<f32>,
+    ) -> LayoutId {
+        let leaf = fixed_intrinsic_leaf(tree, intrinsic_width, 16.);
+        let mut style = taffy::style::Style {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Row,
+            gap: TaffySize {
+                width: length(8.),
+                height: length(0.),
+            },
+            flex_grow,
+            flex_shrink,
+            ..Default::default()
+        };
+        if let Some(width) = width {
+            style.size.width = length(width);
+        }
+        if let Some(min_width) = min_width {
+            style.min_size.width = length(min_width);
+        }
+        if let Some(flex_basis) = flex_basis {
+            style.flex_basis = length(flex_basis);
+        }
+        tree.new_node(style, Vec::new(), &[leaf], None)
+    }
+
+    fn nested_layout_tree(depth: usize) -> (GpuiTaffyTree, LayoutId) {
+        let mut tree = GpuiTaffyTree::default();
+        let mut rows = Vec::with_capacity(60);
+        for _ in 0..60 {
+            let first = nested_layout_cell(&mut tree, 56., None, Some(230.), 1., 1., Some(0.));
+            let second = nested_layout_cell(&mut tree, 16., Some(132.), None, 0., 0., None);
+            let third = nested_layout_cell(&mut tree, 70., Some(300.), None, 0., 0., None);
+            let row = flex_container(&mut tree, &[first, second, third], |style| {
+                style.align_items = Some(AlignItems::CENTER);
+                style.min_size.height = length(36.);
+                style.padding = TaffyRect {
+                    top: length(4.),
+                    right: length(0.),
+                    bottom: length(4.),
+                    left: length(0.),
+                };
+                style.gap = TaffySize {
+                    width: length(16.),
+                    height: length(0.),
+                };
+                style.flex_shrink = 0.;
+            });
+            rows.push(row);
+        }
+
+        let mut children = rows;
+        for _ in 0..depth {
+            let wrapper = flex_container(&mut tree, &children, |style| {
+                style.align_items = Some(AlignItems::STRETCH);
+                style.flex_direction = FlexDirection::Column;
+                style.gap = TaffySize {
+                    width: length(1.),
+                    height: length(1.),
+                };
+            });
+            children = vec![wrapper];
+        }
+
+        let root_style = taffy::style::Style {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Column,
+            size: TaffySize {
+                width: length(1425.),
+                height: length(900.),
+            },
+            ..Default::default()
+        };
+        let root = tree.new_node(root_style, Vec::new(), &children, None);
+        (tree, root)
+    }
+
+    fn nested_layout_compute_counts(depth: usize) -> (usize, usize) {
+        let (mut tree, root) = nested_layout_tree(depth);
+        let mut run = LayoutRun {
+            tree: &mut tree,
+            window: None,
+            cx: None,
+            scale_factor: 1.,
+        };
+        compute_root_layout(
+            &mut run,
+            root.into(),
+            TaffySize {
+                width: TaffyAvailableSpace::Definite(1425.),
+                height: TaffyAvailableSpace::Definite(900.),
+            },
+        );
+        let total = tree.nodes.iter().map(|node| node.uncached_computes).sum();
+        let maximum = tree
+            .nodes
+            .iter()
+            .map(|node| node.uncached_computes)
+            .max()
+            .unwrap_or(0);
+        (total, maximum)
+    }
+
+    #[test]
+    fn layout_cache_nested_layout_compute_counts_stay_bounded() {
+        let counts = [0, 2, 4, 6].map(nested_layout_compute_counts);
+        println!("layout_cache_nested_layout_compute_counts: {counts:?}");
+
+        assert!(counts[3].0 <= counts[0].0 * 3);
+        // Stock Taffy's nine-slot cache reaches 201487/520 at depth 6 versus
+        // 5500/18 with width partitions, so this checks shape rather than time.
+        assert_eq!(
+            counts[3].1,
+            counts[1].1,
+            "per-node work must not compound between two and six wrappers"
+        );
     }
 
     fn bottom(layout: &Layout) -> f32 {
@@ -1351,7 +1752,7 @@ mod tests {
         assert_eq!(tree.layout(second_grid_child.0).location.x, 20.);
 
         let hidden = fixed_leaf(&mut tree, 40., 40., Some(30.));
-        tree.node_mut(hidden.0).style.display = Display::None;
+        Rc::make_mut(&mut tree.node_mut(hidden.0).style).display = Display::None;
         compute_test_layout(&mut tree, hidden);
         assert_eq!(tree.layout(hidden.0).size, TaffySize::ZERO);
     }
