@@ -57,14 +57,25 @@ struct Background {
     // 0u is Solid
     // 1u is LinearGradient
     // 2u is PatternSlash
+    // 3u is Checkerboard
+    // 4u is RepeatingHatch135
     uint tag;
     // 0u is sRGB linear color
     // 1u is Oklab color
     uint color_space;
     Hsla solid;
     float gradient_angle_or_pattern_height;
-    LinearColorStop colors[2];
-    uint pad;
+    LinearColorStop colors[8];
+    uint color_count;
+    // Only consulted when `tag` is `RepeatingHatch135`.
+    float pattern_stripe_width;
+    float pattern_period;
+    // Negative `pattern_tile_width`/`pattern_tile_height` is a sentinel meaning
+    // "use the primitive's own bounds as the repeat tile".
+    float pattern_tile_origin_x;
+    float pattern_tile_origin_y;
+    float pattern_tile_width;
+    float pattern_tile_height;
 };
 
 struct GradientColor {
@@ -348,9 +359,9 @@ float clip_chain_alpha(float2 pt, uint rounded_head) {
     return alpha;
 }
 
-GradientColor prepare_gradient_color(uint tag, uint color_space, Hsla solid, LinearColorStop colors[2]) {
+GradientColor prepare_gradient_color(uint tag, uint color_space, Hsla solid, LinearColorStop colors[8]) {
     GradientColor output;
-    if (tag == 0 || tag == 2 || tag == 3) {
+    if (tag == 0 || tag == 2 || tag == 3 || tag == 4) {
         output.solid = hsla_to_rgba(solid);
     } else if (tag == 1) {
         output.color0 = hsla_to_rgba(colors[0].color);
@@ -468,6 +479,30 @@ float4 gradient_color(Background background,
 
             color = solid_color;
             color.a *= saturate(should_be_colored);
+            break;
+        }
+        case 4: {
+            // Repeating 135deg CSS hatch, hard-edged stripes, no AA/dither.
+            float stripe_width = background.pattern_stripe_width;
+            float period = background.pattern_period;
+            float2 tile_origin = float2(background.pattern_tile_origin_x, background.pattern_tile_origin_y);
+            float2 tile_size = float2(background.pattern_tile_width, background.pattern_tile_height);
+            if (tile_size.x < 0.0 || tile_size.y < 0.0) {
+                tile_origin = bounds.origin;
+                tile_size = bounds.size;
+            }
+
+            if (tile_size.x <= 0.0 || tile_size.y <= 0.0 || stripe_width <= 0.0 || period <= 0.0) {
+                color = float4(0.0, 0.0, 0.0, 0.0);
+            } else {
+                float2 rel = position - tile_origin;
+                float2 uv = rel - tile_size * floor(rel / tile_size);
+                float t = (uv.x + uv.y) * 0.7071067811865476;
+                float phase = t - period * floor(t / period);
+                float coverage = phase < min(stripe_width, period) ? 1.0 : 0.0;
+                color = solid_color;
+                color.a *= coverage;
+            }
             break;
         }
     }

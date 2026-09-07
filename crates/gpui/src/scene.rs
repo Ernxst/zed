@@ -942,7 +942,7 @@ impl Path<Pixels> {
             start: self.start.map(|start| start.scale(factor)),
             current: self.current.scale(factor),
             contour_count: self.contour_count,
-            color: self.color,
+            color: self.color.scale(factor),
         }
     }
 

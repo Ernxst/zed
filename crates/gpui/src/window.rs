@@ -4514,7 +4514,7 @@ impl Window {
             bounds: snapped_bounds,
             clip_id,
             pad: 0,
-            background: quad.background.opacity(opacity),
+            background: quad.background.opacity(opacity).scale(self.scale_factor()),
             border_color: quad.border_color.opacity(opacity),
             corner_radii: quad.corner_radii.scale(self.scale_factor()),
             border_widths: snapped_border_widths,

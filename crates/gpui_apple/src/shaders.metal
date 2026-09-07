@@ -1231,7 +1231,7 @@ float4 over(float4 below, float4 above) {
 GradientColor prepare_fill_color(uint tag, uint color_space, Hsla solid,
                                      Hsla color0, Hsla color1) {
   GradientColor out;
-  if (tag == 0 || tag == 2 || tag == 3) {
+  if (tag == 0 || tag == 2 || tag == 3 || tag == 4) {
     out.solid = hsla_to_rgba(solid);
   } else if (tag == 1) {
     out.color0 = hsla_to_rgba(color0);
@@ -1369,6 +1369,30 @@ float4 fill_color(Background background,
 
         color = solid_color;
         color.a *= saturate(should_be_colored);
+        break;
+    }
+    case 4: {
+        // Repeating 135deg CSS hatch, hard-edged stripes, no AA/dither.
+        float stripe_width = background.pattern_stripe_width;
+        float period = background.pattern_period;
+        float2 tile_origin = float2(background.pattern_tile_origin_x, background.pattern_tile_origin_y);
+        float2 tile_size = float2(background.pattern_tile_width, background.pattern_tile_height);
+        if (tile_size.x < 0.0 || tile_size.y < 0.0) {
+          tile_origin = float2(bounds.origin.x, bounds.origin.y);
+          tile_size = float2(bounds.size.width, bounds.size.height);
+        }
+
+        if (tile_size.x <= 0.0 || tile_size.y <= 0.0 || stripe_width <= 0.0 || period <= 0.0) {
+          color = float4(0.0);
+        } else {
+          float2 rel = position - tile_origin;
+          float2 uv = rel - tile_size * floor(rel / tile_size);
+          float t = (uv.x + uv.y) * 0.7071067811865476;
+          float phase = t - period * floor(t / period);
+          float coverage = phase < min(stripe_width, period) ? 1.0 : 0.0;
+          color = solid_color;
+          color.a *= coverage;
+        }
         break;
     }
   }

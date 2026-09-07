@@ -789,13 +789,16 @@ impl Style {
 
         window.paint_drop_shadows(bounds, corner_radii, &self.box_shadow);
 
+        let border_widths = self.border_widths.to_pixels(rem_size);
+
         let background_color = self.background.as_ref().and_then(Fill::color);
         if background_color.is_some_and(|color| !color.is_transparent()) {
             let mut border_color = match background_color {
                 Some(color) => match color.tag {
                     BackgroundTag::Solid
                     | BackgroundTag::PatternSlash
-                    | BackgroundTag::Checkerboard => color.solid,
+                    | BackgroundTag::Checkerboard
+                    | BackgroundTag::RepeatingHatch135 => color.solid,
 
                     BackgroundTag::LinearGradient => color
                         .colors
@@ -806,10 +809,31 @@ impl Style {
                 None => Hsla::default(),
             };
             border_color.a = 0.;
+
+            // The CSS default `background-origin` is the padding box: the border
+            // box inset by the border widths. Round each logical edge first (this
+            // matches Chromium's layout-pixel snapping of the positioning area),
+            // then derive nonnegative dimensions from the rounded edges.
+            let padding_left = (bounds.origin.x + border_widths.left).round();
+            let padding_top = (bounds.origin.y + border_widths.top).round();
+            let padding_right =
+                (bounds.origin.x + bounds.size.width - border_widths.right).round();
+            let padding_bottom =
+                (bounds.origin.y + bounds.size.height - border_widths.bottom).round();
+            let padding_area = Bounds {
+                origin: point(padding_left, padding_top),
+                size: size(
+                    (padding_right - padding_left).max(Pixels::ZERO),
+                    (padding_bottom - padding_top).max(Pixels::ZERO),
+                ),
+            };
+
             window.paint_quad(quad(
                 bounds,
                 corner_radii,
-                background_color.unwrap_or_default(),
+                background_color
+                    .unwrap_or_default()
+                    .positioning_area(padding_area),
                 Edges::default(),
                 border_color,
                 self.border_style,
@@ -821,7 +845,6 @@ impl Style {
         continuation(window, cx);
 
         if self.is_border_visible() {
-            let border_widths = self.border_widths.to_pixels(rem_size);
             let mut background = self.border_color.unwrap_or_default();
             background.a = 0.;
             window.paint_quad(quad(

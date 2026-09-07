@@ -1,3 +1,4 @@
+use crate::{Bounds, Pixels};
 use anyhow::{Context as _, bail};
 use schemars::{JsonSchema, json_schema};
 use serde::{
@@ -747,6 +748,10 @@ pub(crate) enum BackgroundTag {
     LinearGradient = 1,
     PatternSlash = 2,
     Checkerboard = 3,
+    /// A 135deg CSS repeating-linear-gradient hatch, matching the two-stop
+    /// hard-edged Chromium rendering rather than the (unrelated) `PatternSlash`
+    /// GPUI primitive.
+    RepeatingHatch135 = 4,
 }
 
 /// A color space for color interpolation.
@@ -783,6 +788,26 @@ pub struct Background {
     pub(crate) gradient_angle_or_pattern_height: f32,
     pub(crate) colors: [LinearColorStop; MAX_LINEAR_GRADIENT_STOPS],
     pub(crate) color_count: u32,
+    /// Only consulted when `tag` is `RepeatingHatch135`.
+    #[serde(default)]
+    pub(crate) pattern_stripe_width: f32,
+    /// Only consulted when `tag` is `RepeatingHatch135`.
+    #[serde(default)]
+    pub(crate) pattern_period: f32,
+    /// Only consulted when `tag` is `RepeatingHatch135`. Negative
+    /// `pattern_tile_width`/`pattern_tile_height` is a sentinel meaning "use the
+    /// primitive's own bounds as the repeat tile".
+    #[serde(default)]
+    pub(crate) pattern_tile_origin_x: f32,
+    /// See `pattern_tile_origin_x`.
+    #[serde(default)]
+    pub(crate) pattern_tile_origin_y: f32,
+    /// See `pattern_tile_origin_x`.
+    #[serde(default)]
+    pub(crate) pattern_tile_width: f32,
+    /// See `pattern_tile_origin_x`.
+    #[serde(default)]
+    pub(crate) pattern_tile_height: f32,
 }
 
 impl std::fmt::Debug for Background {
@@ -805,6 +830,11 @@ impl std::fmt::Debug for Background {
                 "Checkerboard({:?}, {})",
                 self.solid, self.gradient_angle_or_pattern_height
             ),
+            BackgroundTag::RepeatingHatch135 => write!(
+                f,
+                "RepeatingHatch135({:?}, width={}, period={})",
+                self.solid, self.pattern_stripe_width, self.pattern_period
+            ),
         }
     }
 }
@@ -819,6 +849,12 @@ impl Default for Background {
             gradient_angle_or_pattern_height: 0.0,
             colors: [LinearColorStop::default(); MAX_LINEAR_GRADIENT_STOPS],
             color_count: 0,
+            pattern_stripe_width: 0.0,
+            pattern_period: 0.0,
+            pattern_tile_origin_x: 0.0,
+            pattern_tile_origin_y: 0.0,
+            pattern_tile_width: 0.0,
+            pattern_tile_height: 0.0,
         }
     }
 }
@@ -843,6 +879,26 @@ pub fn checkerboard(color: impl Into<Hsla>, size: f32) -> Background {
         tag: BackgroundTag::Checkerboard,
         solid: color.into(),
         gradient_angle_or_pattern_height: size,
+        ..Default::default()
+    }
+}
+
+/// Creates a background painted with a repeating 135deg CSS hatch: hard-edged
+/// diagonal stripes matching Chromium's rendering of
+/// `repeating-linear-gradient(135deg, <color> 0, <color> <stripe_width>, transparent <stripe_width>, transparent <period>)`.
+///
+/// `stripe_width` and `period` are logical (unscaled) pixels, measured along the
+/// gradient axis. By default the repeat tile is the primitive's own bounds;
+/// call [`Background::positioning_area`] to size the tile independently (e.g. to
+/// a CSS background-positioning area).
+pub fn repeating_hatch_135(color: impl Into<Hsla>, stripe_width: f32, period: f32) -> Background {
+    Background {
+        tag: BackgroundTag::RepeatingHatch135,
+        solid: color.into(),
+        pattern_stripe_width: stripe_width,
+        pattern_period: period,
+        pattern_tile_width: -1.0,
+        pattern_tile_height: -1.0,
         ..Default::default()
     }
 }
@@ -972,7 +1028,42 @@ impl Background {
                 .all(|color| color.color.is_transparent()),
             BackgroundTag::PatternSlash => self.solid.is_transparent(),
             BackgroundTag::Checkerboard => self.solid.is_transparent(),
+            BackgroundTag::RepeatingHatch135 => self.solid.is_transparent(),
         }
+    }
+
+    /// Sizes and positions the repeat tile for a [`BackgroundTag::RepeatingHatch135`]
+    /// background to the given area (e.g. a CSS background-positioning area), in the
+    /// same logical (unscaled) units as the background's `stripe_width`/`period`.
+    ///
+    /// Has no effect on other background tags.
+    pub fn positioning_area(mut self, area: Bounds<Pixels>) -> Self {
+        if self.tag == BackgroundTag::RepeatingHatch135 {
+            self.pattern_tile_origin_x = area.origin.x.into();
+            self.pattern_tile_origin_y = area.origin.y.into();
+            self.pattern_tile_width = area.size.width.into();
+            self.pattern_tile_height = area.size.height.into();
+        }
+        self
+    }
+
+    /// Scales a [`BackgroundTag::RepeatingHatch135`] background's logical
+    /// parameters (stripe width, period, and, unless still the "use the
+    /// primitive's own bounds" sentinel, the repeat tile) by `factor`. Intended
+    /// to be called exactly once, when converting logical pixels to scaled/device
+    /// pixels for painting. Has no effect on other background tags.
+    pub(crate) fn scale(mut self, factor: f32) -> Self {
+        if self.tag == BackgroundTag::RepeatingHatch135 {
+            self.pattern_stripe_width *= factor;
+            self.pattern_period *= factor;
+            if self.pattern_tile_width >= 0.0 && self.pattern_tile_height >= 0.0 {
+                self.pattern_tile_origin_x *= factor;
+                self.pattern_tile_origin_y *= factor;
+                self.pattern_tile_width *= factor;
+                self.pattern_tile_height *= factor;
+            }
+        }
+        self
     }
 }
 
@@ -1087,6 +1178,95 @@ mod tests {
             &background.opacity(0.5).colors[..3],
             &stops.map(|stop| stop.opacity(0.5))
         );
+    }
+
+    #[test]
+    fn test_background_repeating_hatch_135_logical_parameters() {
+        let color = Hsla::from(rgba(0xff0000ff));
+        let background = repeating_hatch_135(color, 4.0, 12.0);
+        assert_eq!(background.tag, BackgroundTag::RepeatingHatch135);
+        assert_eq!(background.solid, color);
+        assert_eq!(background.pattern_stripe_width, 4.0);
+        assert_eq!(background.pattern_period, 12.0);
+        // Sentinel: no explicit positioning area was set, so the primitive's own
+        // bounds should be used at paint time.
+        assert_eq!(background.pattern_tile_width, -1.0);
+        assert_eq!(background.pattern_tile_height, -1.0);
+    }
+
+    #[test]
+    fn test_background_repeating_hatch_135_positioning_area() {
+        let background = repeating_hatch_135(rgba(0xff0000ff), 4.0, 12.0).positioning_area(
+            crate::Bounds {
+                origin: crate::point(crate::px(13.0), crate::px(17.0)),
+                size: crate::size(crate::px(113.0), crate::px(79.0)),
+            },
+        );
+        assert_eq!(background.pattern_tile_origin_x, 13.0);
+        assert_eq!(background.pattern_tile_origin_y, 17.0);
+        assert_eq!(background.pattern_tile_width, 113.0);
+        assert_eq!(background.pattern_tile_height, 79.0);
+    }
+
+    #[test]
+    fn test_background_repeating_hatch_135_scale_default_sentinel() {
+        let background = repeating_hatch_135(rgba(0xff0000ff), 4.0, 12.0).scale(2.0);
+        assert_eq!(background.pattern_stripe_width, 8.0);
+        assert_eq!(background.pattern_period, 24.0);
+        // The sentinel tile size stays untouched by scaling.
+        assert_eq!(background.pattern_tile_width, -1.0);
+        assert_eq!(background.pattern_tile_height, -1.0);
+        assert_eq!(background.pattern_tile_origin_x, 0.0);
+        assert_eq!(background.pattern_tile_origin_y, 0.0);
+    }
+
+    #[test]
+    fn test_background_repeating_hatch_135_scale_explicit_tile() {
+        let background = repeating_hatch_135(rgba(0xff0000ff), 4.0, 12.0)
+            .positioning_area(crate::Bounds {
+                origin: crate::point(crate::px(13.0), crate::px(17.0)),
+                size: crate::size(crate::px(113.0), crate::px(79.0)),
+            })
+            .scale(2.0);
+        assert_eq!(background.pattern_stripe_width, 8.0);
+        assert_eq!(background.pattern_period, 24.0);
+        assert_eq!(background.pattern_tile_origin_x, 26.0);
+        assert_eq!(background.pattern_tile_origin_y, 34.0);
+        assert_eq!(background.pattern_tile_width, 226.0);
+        assert_eq!(background.pattern_tile_height, 158.0);
+    }
+
+    #[test]
+    fn test_background_repeating_hatch_135_opacity() {
+        let color = Hsla::from(rgba(0xff0000ff));
+        let background = repeating_hatch_135(color, 4.0, 12.0);
+        assert_eq!(background.opacity(0.5).solid, color.opacity(0.5));
+        assert!(!background.is_transparent());
+        assert!(background.opacity(0.0).is_transparent());
+    }
+
+    #[test]
+    fn test_background_repeating_hatch_135_default_sentinel() {
+        let background = Background::default();
+        assert_eq!(background.pattern_stripe_width, 0.0);
+        assert_eq!(background.pattern_period, 0.0);
+        assert_eq!(background.pattern_tile_origin_x, 0.0);
+        assert_eq!(background.pattern_tile_origin_y, 0.0);
+        assert_eq!(background.pattern_tile_width, 0.0);
+        assert_eq!(background.pattern_tile_height, 0.0);
+    }
+
+    #[test]
+    fn test_background_pattern_slash_scale_is_unaffected_by_hatch_fields() {
+        let background = pattern_slash(rgba(0xff0000ff), 0.25, 0.75);
+        let scaled = background.scale(2.0);
+        // `pattern_slash` backgrounds are untouched by `Background::scale`.
+        assert_eq!(
+            scaled.gradient_angle_or_pattern_height,
+            background.gradient_angle_or_pattern_height
+        );
+        assert_eq!(scaled.pattern_stripe_width, 0.0);
+        assert_eq!(scaled.pattern_period, 0.0);
     }
 
     #[test]

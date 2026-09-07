@@ -2307,7 +2307,9 @@ impl RenderingParameters {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{MonochromeSprite, PolychromeSprite, Quad, Shadow, SubpixelSprite, Underline};
+    use gpui::{
+        Background, MonochromeSprite, PolychromeSprite, Quad, Shadow, SubpixelSprite, Underline,
+    };
 
     #[test]
     fn webgl_shader_is_valid_wgsl_without_storage_buffers() {
@@ -2338,9 +2340,10 @@ mod tests {
     #[test]
     fn webgl_record_sizes_match_shader_word_strides() {
         assert_eq!(std::mem::size_of::<ClipNode>(), 14 * 4);
-        assert_eq!(std::mem::size_of::<Quad>(), 68 * 4);
+        assert_eq!(std::mem::size_of::<Background>(), 54 * 4);
+        assert_eq!(std::mem::size_of::<Quad>(), 74 * 4);
         assert_eq!(std::mem::size_of::<Shadow>(), 24 * 4);
-        assert_eq!(std::mem::size_of::<PathRasterizationVertex>(), 58 * 4);
+        assert_eq!(std::mem::size_of::<PathRasterizationVertex>(), 64 * 4);
         assert_eq!(std::mem::size_of::<PathSprite>(), 4 * 4);
         assert_eq!(std::mem::size_of::<Underline>(), 12 * 4);
         assert_eq!(std::mem::size_of::<MonochromeSprite>(), 24 * 4);

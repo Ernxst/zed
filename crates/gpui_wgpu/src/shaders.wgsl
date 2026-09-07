@@ -135,6 +135,7 @@ struct Background {
     // 1u is LinearGradient
     // 2u is PatternSlash
     // 3u is Checkerboard
+    // 4u is RepeatingHatch135
     tag: u32,
     // 0u is sRGB linear color
     // 1u is Oklab color
@@ -143,6 +144,15 @@ struct Background {
     gradient_angle_or_pattern_height: f32,
     colors: array<LinearColorStop, 8>,
     color_count: u32,
+    // Only consulted when `tag` is `RepeatingHatch135`.
+    pattern_stripe_width: f32,
+    pattern_period: f32,
+    // Negative `pattern_tile_width`/`pattern_tile_height` is a sentinel meaning
+    // "use the primitive's own bounds as the repeat tile".
+    pattern_tile_origin_x: f32,
+    pattern_tile_origin_y: f32,
+    pattern_tile_width: f32,
+    pattern_tile_height: f32,
 }
 
 struct AtlasTextureId {
@@ -437,7 +447,7 @@ fn prepare_gradient_color(tag: u32, color_space: u32,
     solid: Hsla, colors: array<LinearColorStop, 8>) -> GradientColor {
     var result = GradientColor();
 
-    if (tag == 0u || tag == 2u || tag == 3u) {
+    if (tag == 0u || tag == 2u || tag == 3u || tag == 4u) {
         result.solid = hsla_to_rgba(solid);
     } else if (tag == 1u) {
         // The hsla_to_rgba is returns a linear sRGB color
@@ -564,6 +574,29 @@ fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
 
             background_color = solid_color;
             background_color.a *= saturate(should_be_colored);
+        }
+        case 4u: {
+            // Repeating 135deg CSS hatch, hard-edged stripes, no AA/dither.
+            let stripe_width = background.pattern_stripe_width;
+            let period = background.pattern_period;
+            var tile_origin = vec2<f32>(background.pattern_tile_origin_x, background.pattern_tile_origin_y);
+            var tile_size = vec2<f32>(background.pattern_tile_width, background.pattern_tile_height);
+            if (tile_size.x < 0.0 || tile_size.y < 0.0) {
+                tile_origin = bounds.origin;
+                tile_size = bounds.size;
+            }
+
+            if (tile_size.x <= 0.0 || tile_size.y <= 0.0 || stripe_width <= 0.0 || period <= 0.0) {
+                background_color = vec4<f32>(0.0);
+            } else {
+                let rel = position - tile_origin;
+                let uv = rel - tile_size * floor(rel / tile_size);
+                let t = (uv.x + uv.y) * 0.7071067811865476;
+                let phase = t - period * floor(t / period);
+                let coverage = select(0.0, 1.0, phase < min(stripe_width, period));
+                background_color = solid_color;
+                background_color.a *= coverage;
+            }
         }
     }
 
