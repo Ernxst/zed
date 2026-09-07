@@ -1288,12 +1288,12 @@ pub trait InteractiveElement: Sized {
 pub trait StatefulInteractiveElement: InteractiveElement {
     /// Set the accessible role for this element.
     ///
+    /// A `GenericContainer` role produces a node GPUI reports, so a label or
+    /// description on a role-less element is observable in the debug tree.
+    /// AccessKit's platform adapters prune generic nodes.
+    ///
     /// See the [accessibility guide](crate::_accessibility) for an overview.
     fn role(mut self, role: accesskit::Role) -> Self {
-        debug_assert!(
-            role != accesskit::Role::GenericContainer,
-            "GenericContainer is filtered out of the a11y tree and has no effect"
-        );
         self.interactivity().override_role = Some(role);
         self
     }
@@ -1881,11 +1881,10 @@ impl Element for Div {
     }
 
     fn a11y_role(&self) -> Option<accesskit::Role> {
-        // Nodes with `GenericContainer` should never be reported to accesskit.
-        // Equivalent to an HTML div with no role.
-        self.interactivity
-            .override_role
-            .filter(|role| *role != accesskit::Role::GenericContainer)
+        // A `GenericContainer` node is reported so labels and descriptions on
+        // role-less elements are observable in the debug tree. AccessKit's
+        // platform adapters prune generic nodes.
+        self.interactivity.override_role
     }
 
     fn write_a11y_info(&self, node: &mut accesskit::Node) {
