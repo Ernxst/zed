@@ -9,9 +9,9 @@
 
 use crate::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, DispatchPhase, Edges, Element, EntityId,
-    FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
-    Overflow, Pixels, Point, ScrollWheelEvent, Size, Style, StyleRefinement, Styled, Window, point,
-    px, size,
+    ElementId, FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
+    InteractiveElement, Interactivity, IntoElement, Overflow, Pixels, Point, ScrollWheelEvent,
+    Size, StatefulInteractiveElement, Style, StyleRefinement, Styled, Window, point, px, size,
 };
 use collections::VecDeque;
 use refineable::Refineable as _;
@@ -30,6 +30,7 @@ pub fn list(
         render_item: Box::new(render_item),
         style: StyleRefinement::default(),
         sizing_behavior: ListSizingBehavior::default(),
+        interactivity: Interactivity::new(),
     }
 }
 
@@ -39,6 +40,9 @@ pub struct List {
     render_item: Box<RenderItemFn>,
     style: StyleRefinement,
     sizing_behavior: ListSizingBehavior,
+    /// Identity and accessibility state only. `List` does not run `Interactivity`'s
+    /// layout, hitbox, or listener machinery.
+    interactivity: Interactivity,
 }
 
 impl List {
@@ -48,6 +52,14 @@ impl List {
         self
     }
 }
+
+impl InteractiveElement for List {
+    fn interactivity(&mut self) -> &mut Interactivity {
+        &mut self.interactivity
+    }
+}
+
+impl StatefulInteractiveElement for List {}
 
 /// The list state that views must hold on behalf of the list element.
 #[derive(Clone)]
@@ -1488,8 +1500,16 @@ impl Element for List {
     type RequestLayoutState = ();
     type PrepaintState = ListPrepaintState;
 
-    fn id(&self) -> Option<crate::ElementId> {
-        None
+    fn id(&self) -> Option<ElementId> {
+        self.interactivity.element_id.clone()
+    }
+
+    fn a11y_role(&self) -> Option<accesskit::Role> {
+        self.interactivity.override_role
+    }
+
+    fn write_a11y_info(&self, node: &mut accesskit::Node) {
+        self.interactivity.write_a11y_info(node);
     }
 
     fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
