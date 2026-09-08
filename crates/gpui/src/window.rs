@@ -72,8 +72,8 @@ use self::a11y::A11y;
 #[cfg(not(target_family = "wasm"))]
 use self::a11y::ROOT_NODE_ID;
 use crate::util::{
-    atomic_incr_if_not_zero, ceil_to_device_pixel, floor_to_device_pixel, round_half_toward_zero,
-    round_half_toward_zero_f64, round_stroke_to_device_pixel, round_to_device_pixel,
+    atomic_incr_if_not_zero, ceil_to_device_pixel, floor_to_device_pixel,
+    round_stroke_to_device_pixel, round_to_device_pixel, round_to_device_pixel_f64,
 };
 pub use prompts::*;
 
@@ -2972,7 +2972,7 @@ impl Window {
     #[inline]
     pub fn pixel_snap_f64(&self, value: f64) -> f64 {
         let scale_factor = f64::from(self.scale_factor());
-        round_half_toward_zero_f64(value * scale_factor) / scale_factor
+        round_to_device_pixel_f64(value, scale_factor) / scale_factor
     }
 
     /// Snaps a bounds' origin and size to the nearest device pixel.
@@ -3000,7 +3000,7 @@ impl Window {
         )
     }
 
-    /// Rounds half-to-zero but clamps any non-zero input up to 1 dp so thin strokes do not disappear.
+    /// Rounds half-up but clamps any non-zero input up to 1 dp so thin strokes do not disappear.
     #[inline]
     fn snap_stroke(&self, value: Pixels) -> ScaledPixels {
         ScaledPixels(round_stroke_to_device_pixel(value.0, self.scale_factor()))
@@ -4683,9 +4683,9 @@ impl Window {
         let glyph_origin = origin.scale(scale_factor);
 
         let quantized_origin = Point::new(
-            round_half_toward_zero(glyph_origin.x.0 * SUBPIXEL_VARIANTS_X as f32)
+            round_to_device_pixel(glyph_origin.x.0, SUBPIXEL_VARIANTS_X as f32)
                 / SUBPIXEL_VARIANTS_X as f32,
-            round_half_toward_zero(glyph_origin.y.0 * SUBPIXEL_VARIANTS_Y as f32)
+            round_to_device_pixel(glyph_origin.y.0, SUBPIXEL_VARIANTS_Y as f32)
                 / SUBPIXEL_VARIANTS_Y as f32,
         );
         let subpixel_variant = Point::new(
@@ -4782,7 +4782,7 @@ impl Window {
 
         let scale_factor = self.scale_factor();
         let glyph_origin = origin.scale(scale_factor);
-        let integer_origin = glyph_origin.map(|c| ScaledPixels(round_half_toward_zero(c.0)));
+        let integer_origin = glyph_origin.map(|c| ScaledPixels(round_to_device_pixel(c.0, 1.0)));
         let params = RenderGlyphParams {
             font_id,
             glyph_id,
@@ -4873,7 +4873,7 @@ impl Window {
                 .map(|value| ScaledPixels(value.0 as f32 / SMOOTH_SVG_SCALE_FACTOR)),
         };
         let final_bounds = svg_bounds
-            .map_origin(|value| ScaledPixels(round_half_toward_zero(value.0)))
+            .map_origin(|value| ScaledPixels(round_to_device_pixel(value.0, 1.0)))
             .map_size(|size| size.ceil());
 
         self.next_frame.scene.insert_primitive(MonochromeSprite {

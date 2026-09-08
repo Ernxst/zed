@@ -2,10 +2,7 @@ use crate::{
     AbsoluteLength, App, Bounds, CalcLength, DefiniteLength, Edges, GridTemplate,
     GridTemplateComponent, GridTrack, GridTrackMax, GridTrackMin, Length, Pixels, Point, Size,
     Style, Window, size,
-    util::{
-        ceil_to_device_pixel, round_half_toward_zero, round_stroke_to_device_pixel,
-        round_to_device_pixel,
-    },
+    util::{ceil_to_device_pixel, round_stroke_to_device_pixel, round_to_device_pixel},
 };
 use collections::{FxHashMap, FxHashSet};
 use std::{fmt::Debug, ops::Range, rc::Rc};
@@ -726,17 +723,16 @@ impl TaffyLayoutEngine {
     // by `scale_factor`, so that snapping targets physical pixels. Bounds
     // are divided by `scale_factor` before being returned to GPUI.
     //
-    // Midpoints are rounded toward zero. This is a stylistic choice: a
-    // 1-logical-pixel line at 150% scale should render as 1 dp rather than
-    // 2 dp.
+    // Midpoint ties are rounded half up, toward positive infinity, to match
+    // browser layout-pixel snapping.
     //
     // Pixel snapping is done in two phases:
     //
-    //  1. Pre-layout metric snapping. Before Taffy computes layout, all
-    //     authored absolute lengths are rounded in `to_taffy`. This
-    //     includes borders, padding, gaps, and explicit sizes.
-    //     Custom-measured leaf nodes have their measured sizes rounded up
-    //     to integer device-pixel lengths.
+    //  1. Pre-layout metric handling. Authored absolute lengths are passed to
+    //     Taffy unrounded so post-layout edge snapping can see their true
+    //     positions and sizes. Border widths are snapped independently using
+    //     the stroke rule, and custom-measured leaf sizes are rounded up to
+    //     integer device-pixel lengths.
     //
     //  2. Post-layout edge snapping. After Taffy resolves the tree, layout
     //     relationships such as flex shares, grid tracks, percentages, and
@@ -771,18 +767,11 @@ impl TaffyLayoutEngine {
     //    their shared boundary from different sources, so closure is not
     //    guaranteed.
     //
-    // We apply absolute edge rounding for each element's outer box in
-    // post-layout rounding to preserve closure. Border and padding widths
-    // are not touched by post-layout rounding; they keep their pre-layout
-    // rounded value so that they remain stable under translation.
-    //
-    // This gives both closure and translation stability in the case that
-    // all local metrics are integer device-pixel lengths. Pre-layout
-    // rounding covers that in most cases. The exception is metrics
-    // resolved by layout relationships, such as percentages. Outer box
-    // edges will still close globally, and painted border widths are still
-    // snapped independently, but the raw content-box origin can carry a
-    // 1dp residual into descendants.
+    // We apply absolute edge snapping with half-up ties to each element's
+    // outer box in post-layout rounding to preserve closure. A box's device
+    // width is therefore `round(far) - round(near)`, so translation stability
+    // is deliberately not guaranteed. Painted strokes are snapped
+    // independently with the stroke rule.
 
     pub fn layout_bounds(&mut self, id: LayoutId, scale_factor: f32) -> Bounds<Pixels> {
         if let Some(layout) = self.absolute_layout_bounds.get(&id).cloned() {
@@ -811,8 +800,8 @@ impl TaffyLayoutEngine {
 
         let absolute_far = absolute_outer_origin + Point::from(Size::from(layout_size));
         let snapped_bounds = Bounds::from_corners(
-            absolute_outer_origin.map(round_half_toward_zero),
-            absolute_far.map(round_half_toward_zero),
+            absolute_outer_origin.map(|edge| round_to_device_pixel(edge, 1.0)),
+            absolute_far.map(|edge| round_to_device_pixel(edge, 1.0)),
         );
 
         let bounds = (snapped_bounds / scale_factor).map(Pixels);
@@ -973,7 +962,7 @@ impl ToTaffy<taffy::style::Style> for Style {
 
 impl ToTaffy<f32> for AbsoluteLength {
     fn to_taffy(&self, rem_size: Pixels, scale_factor: f32) -> f32 {
-        round_to_device_pixel(self.to_pixels(rem_size).0, scale_factor)
+        self.to_pixels(rem_size).0 * scale_factor
     }
 }
 
@@ -1198,7 +1187,7 @@ impl From<Size<Pixels>> for Size<AvailableSpace> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::px;
+    use crate::{Position, point, px};
     use taffy::{
         AlignContent, AlignItems, FlexDirection, FlexWrap, RequestedAxis, style_helpers::length,
         tree::SizingMode,
@@ -1463,6 +1452,80 @@ mod tests {
         compute_test_layout_at_scale(tree, root, 1.);
     }
 
+    fn absolute_leaf_bounds(left: f32, top: f32, width: f32, height: f32) -> Bounds<Pixels> {
+        let mut engine = TaffyLayoutEngine::new();
+        let leaf = engine.request_layout(
+            Style {
+                position: Position::Absolute,
+                inset: Edges {
+                    top: px(top).into(),
+                    right: Length::auto(),
+                    bottom: Length::auto(),
+                    left: px(left).into(),
+                },
+                size: size(px(width).into(), px(height).into()),
+                border_widths: Edges {
+                    top: px(5.).into(),
+                    right: px(7.).into(),
+                    bottom: px(11.).into(),
+                    left: px(3.).into(),
+                },
+                ..Style::default()
+            },
+            px(16.),
+            1.,
+            &[],
+        );
+        let root = engine.request_layout(
+            Style {
+                size: size(px(200.).into(), px(120.).into()),
+                ..Style::default()
+            },
+            px(16.),
+            1.,
+            &[leaf],
+        );
+
+        let mut run = LayoutRun {
+            tree: &mut engine.taffy,
+            window: None,
+            cx: None,
+            scale_factor: 1.,
+        };
+        compute_root_layout(
+            &mut run,
+            root.into(),
+            TaffySize {
+                width: TaffyAvailableSpace::MaxContent,
+                height: TaffyAvailableSpace::MaxContent,
+            },
+        );
+
+        engine.layout_bounds(leaf, 1.)
+    }
+
+    #[test]
+    fn layout_bounds_snap_authored_absolute_edges_independently() {
+        let bounds = absolute_leaf_bounds(13.25, 17.75, 113.5, 79.25);
+
+        assert_eq!(bounds.origin, point(px(13.), px(18.)));
+        assert_eq!(bounds.size, size(px(114.), px(79.)));
+        assert_eq!(bounds.size.width - px(3. + 7.), px(104.));
+    }
+
+    #[test]
+    fn layout_bounds_half_pixel_ties_match_chromium() {
+        let lefts = [13., 13.25, 13.5, 13.75];
+        let widths = lefts.map(|left| {
+            absolute_leaf_bounds(left, 17.5, 113.5, 79.5)
+                .size
+                .width
+                .0
+        });
+
+        assert_eq!(widths, [114., 114., 113., 113.]);
+    }
+
     fn fixed_intrinsic_leaf(tree: &mut GpuiTaffyTree, width: f32, height: f32) -> LayoutId {
         tree.new_node(
             taffy::style::Style::default(),
@@ -1707,8 +1770,8 @@ mod tests {
         compute_test_layout_at_scale(&mut tree, root, scale_factor);
 
         let painted_baseline = |node: LayoutId, baseline: f32| {
-            let snapped_origin = round_half_toward_zero(tree.layout(node.0).location.y);
-            round_half_toward_zero(snapped_origin + baseline * scale_factor)
+            let snapped_origin = round_to_device_pixel(tree.layout(node.0).location.y, 1.0);
+            round_to_device_pixel(snapped_origin + baseline * scale_factor, 1.0)
         };
         assert_eq!(
             painted_baseline(large, large_baseline),

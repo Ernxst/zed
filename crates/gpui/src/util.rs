@@ -125,20 +125,15 @@ pub(crate) fn atomic_incr_if_not_zero(counter: &AtomicUsize) -> usize {
     }
 }
 
-/// Rounds to the nearest integer with 0.5 ties toward zero.
-#[inline]
-pub(crate) fn round_half_toward_zero(value: f32) -> f32 {
-    (value.abs() - 0.5).ceil().copysign(value)
-}
-
-#[inline]
-pub(crate) fn round_half_toward_zero_f64(value: f64) -> f64 {
-    (value.abs() - 0.5).ceil().copysign(value)
-}
-
+/// Rounds to the nearest integer with 0.5 ties toward positive infinity.
 #[inline]
 pub(crate) fn round_to_device_pixel(logical: f32, scale_factor: f32) -> f32 {
-    round_half_toward_zero(logical * scale_factor)
+    (logical * scale_factor + 0.5).floor()
+}
+
+#[inline]
+pub(crate) fn round_to_device_pixel_f64(logical: f64, scale_factor: f64) -> f64 {
+    (logical * scale_factor + 0.5).floor()
 }
 
 #[inline]
@@ -167,31 +162,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_round_half_toward_zero() {
-        // Midpoint ties go toward zero
-        assert_eq!(round_half_toward_zero(0.5), 0.0);
-        assert_eq!(round_half_toward_zero(1.5), 1.0);
-        assert_eq!(round_half_toward_zero(2.5), 2.0);
-        assert_eq!(round_half_toward_zero(-0.5), 0.0);
-        assert_eq!(round_half_toward_zero(-1.5), -1.0);
-        assert_eq!(round_half_toward_zero(-2.5), -2.0);
+    fn test_round_to_device_pixel() {
+        // Midpoint ties go toward positive infinity.
+        assert_eq!(round_to_device_pixel(0.5, 1.0), 1.0);
+        assert_eq!(round_to_device_pixel(1.5, 1.0), 2.0);
+        assert_eq!(round_to_device_pixel(2.5, 1.0), 3.0);
+        assert_eq!(round_to_device_pixel(-0.5, 1.0), 0.0);
+        assert_eq!(round_to_device_pixel(-1.5, 1.0), -1.0);
+        assert_eq!(round_to_device_pixel(-2.5, 1.0), -2.0);
 
         // Non-midpoint values round to nearest
-        assert_eq!(round_half_toward_zero(1.5001), 2.0);
-        assert_eq!(round_half_toward_zero(1.4999), 1.0);
-        assert_eq!(round_half_toward_zero(-1.5001), -2.0);
-        assert_eq!(round_half_toward_zero(-1.4999), -1.0);
+        assert_eq!(round_to_device_pixel(1.5001, 1.0), 2.0);
+        assert_eq!(round_to_device_pixel(1.4999, 1.0), 1.0);
+        assert_eq!(round_to_device_pixel(-1.5001, 1.0), -2.0);
+        assert_eq!(round_to_device_pixel(-1.4999, 1.0), -1.0);
 
         // Integers are unchanged
-        assert_eq!(round_half_toward_zero(0.0), 0.0);
-        assert_eq!(round_half_toward_zero(3.0), 3.0);
-        assert_eq!(round_half_toward_zero(-3.0), -3.0);
+        assert_eq!(round_to_device_pixel(0.0, 1.0), 0.0);
+        assert_eq!(round_to_device_pixel(3.0, 1.0), 3.0);
+        assert_eq!(round_to_device_pixel(-3.0, 1.0), -3.0);
     }
 
     #[test]
     fn test_device_pixel_helpers() {
-        // Snap uses half-toward-zero: 1.0 * 1.5 = 1.5 ties toward 1.0.
-        assert_eq!(round_to_device_pixel(1.0, 1.5), 1.0);
+        // Snap uses half-up: 1.0 * 1.5 = 1.5 ties toward 2.0.
+        assert_eq!(round_to_device_pixel(1.0, 1.5), 2.0);
         // Below the tie rounds down, above rounds up.
         assert_eq!(round_to_device_pixel(0.3, 2.0), 1.0);
         assert_eq!(round_to_device_pixel(1.4, 1.0), 1.0);
@@ -201,7 +196,7 @@ mod tests {
         assert_eq!(round_stroke_to_device_pixel(0.0, 1.0), 0.0);
         assert_eq!(round_stroke_to_device_pixel(0.4, 1.0), 1.0);
         assert_eq!(round_stroke_to_device_pixel(0.5, 1.0), 1.0);
-        assert_eq!(round_stroke_to_device_pixel(1.0, 1.5), 1.0);
+        assert_eq!(round_stroke_to_device_pixel(1.0, 1.5), 2.0);
         assert_eq!(round_stroke_to_device_pixel(1.6, 1.0), 2.0);
 
         // Cover's near edge floors, far edge ceils. Together they form a strict superset.
@@ -217,12 +212,12 @@ mod tests {
     }
 
     #[test]
-    fn test_round_half_toward_zero_f64() {
-        assert_eq!(round_half_toward_zero_f64(0.5), 0.0);
-        assert_eq!(round_half_toward_zero_f64(-0.5), 0.0);
-        assert_eq!(round_half_toward_zero_f64(1.5), 1.0);
-        assert_eq!(round_half_toward_zero_f64(-1.5), -1.0);
-        assert_eq!(round_half_toward_zero_f64(2.5001), 3.0);
+    fn test_round_to_device_pixel_f64() {
+        assert_eq!(round_to_device_pixel_f64(0.5, 1.0), 1.0);
+        assert_eq!(round_to_device_pixel_f64(-0.5, 1.0), 0.0);
+        assert_eq!(round_to_device_pixel_f64(1.5, 1.0), 2.0);
+        assert_eq!(round_to_device_pixel_f64(-1.5, 1.0), -1.0);
+        assert_eq!(round_to_device_pixel_f64(2.5001, 1.0), 3.0);
     }
 
     #[gpui::test]
