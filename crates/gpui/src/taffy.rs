@@ -2,7 +2,9 @@ use crate::{
     AbsoluteLength, App, Bounds, CalcLength, DefiniteLength, Edges, GridTemplate,
     GridTemplateComponent, GridTrack, GridTrackMax, GridTrackMin, Length, Pixels, Point, Size,
     Style, Window, size,
-    util::{ceil_to_device_pixel, round_stroke_to_device_pixel, round_to_device_pixel},
+    util::{
+        ceil_to_device_pixel, round_half_up, round_stroke_to_device_pixel, round_to_device_pixel,
+    },
 };
 use collections::{FxHashMap, FxHashSet};
 use std::{fmt::Debug, ops::Range, rc::Rc};
@@ -719,20 +721,20 @@ impl TaffyLayoutEngine {
     //   - at fractional scale factors (for example 125% or 150%), integer
     //     logical-pixel values can map to non-integer device-pixel values.
     //
-    // We pixel-snap by rounding in device-pixel space, after multiplying
-    // by `scale_factor`, so that snapping targets physical pixels. Bounds
-    // are divided by `scale_factor` before being returned to GPUI.
+    // Taffy computes layout in device coordinates, but layout edges snap on
+    // the CSS-pixel grid, matching Chromium: divide each absolute edge by
+    // `scale_factor`, round half up, then scale it back. Bounds are divided
+    // by `scale_factor` before being returned to GPUI.
     //
     // Midpoint ties are rounded half up, toward positive infinity, to match
     // browser layout-pixel snapping.
     //
     // Pixel snapping is done in two phases:
     //
-    //  1. Pre-layout metric handling. Authored absolute lengths are passed to
-    //     Taffy unrounded so post-layout edge snapping can see their true
-    //     positions and sizes. Border widths are snapped independently using
-    //     the stroke rule, and custom-measured leaf sizes are rounded up to
-    //     integer device-pixel lengths.
+    //  1. Pre-layout metric handling. Authored absolute lengths, including
+    //     padding, are passed to Taffy unrounded so post-layout edge snapping
+    //     can see their true positions and sizes. Border widths use the stroke
+    //     rule, and custom-measured leaf sizes are rounded up to device pixels.
     //
     //  2. Post-layout edge snapping. After Taffy resolves the tree, layout
     //     relationships such as flex shares, grid tracks, percentages, and
@@ -768,10 +770,12 @@ impl TaffyLayoutEngine {
     //    guaranteed.
     //
     // We apply absolute edge snapping with half-up ties to each element's
-    // outer box in post-layout rounding to preserve closure. A box's device
-    // width is therefore `round(far) - round(near)`, so translation stability
-    // is deliberately not guaranteed. Painted strokes are snapped
-    // independently with the stroke rule.
+    // outer box in post-layout rounding to preserve closure. A box's width
+    // is therefore `round(far) - round(near)` on the CSS-pixel grid, so
+    // translation stability is deliberately not guaranteed. The background
+    // positioning area derives its own half-up padding box in `style.rs`.
+    // Painted strokes and measured leaf sizes snap independently on the
+    // device-pixel grid.
 
     pub fn layout_bounds(&mut self, id: LayoutId, scale_factor: f32) -> Bounds<Pixels> {
         if let Some(layout) = self.absolute_layout_bounds.get(&id).cloned() {
@@ -799,9 +803,10 @@ impl TaffyLayoutEngine {
             .insert(id, absolute_outer_origin);
 
         let absolute_far = absolute_outer_origin + Point::from(Size::from(layout_size));
+        let snap_edge = |edge| round_half_up(edge / scale_factor) * scale_factor;
         let snapped_bounds = Bounds::from_corners(
-            absolute_outer_origin.map(|edge| round_to_device_pixel(edge, 1.0)),
-            absolute_far.map(|edge| round_to_device_pixel(edge, 1.0)),
+            absolute_outer_origin.map(snap_edge),
+            absolute_far.map(snap_edge),
         );
 
         let bounds = (snapped_bounds / scale_factor).map(Pixels);
@@ -1452,7 +1457,13 @@ mod tests {
         compute_test_layout_at_scale(tree, root, 1.);
     }
 
-    fn absolute_leaf_bounds(left: f32, top: f32, width: f32, height: f32) -> Bounds<Pixels> {
+    fn absolute_leaf_bounds(
+        left: f32,
+        top: f32,
+        width: f32,
+        height: f32,
+        scale_factor: f32,
+    ) -> Bounds<Pixels> {
         let mut engine = TaffyLayoutEngine::new();
         let leaf = engine.request_layout(
             Style {
@@ -1473,7 +1484,7 @@ mod tests {
                 ..Style::default()
             },
             px(16.),
-            1.,
+            scale_factor,
             &[],
         );
         let root = engine.request_layout(
@@ -1482,7 +1493,7 @@ mod tests {
                 ..Style::default()
             },
             px(16.),
-            1.,
+            scale_factor,
             &[leaf],
         );
 
@@ -1490,7 +1501,7 @@ mod tests {
             tree: &mut engine.taffy,
             window: None,
             cx: None,
-            scale_factor: 1.,
+            scale_factor,
         };
         compute_root_layout(
             &mut run,
@@ -1501,29 +1512,56 @@ mod tests {
             },
         );
 
-        engine.layout_bounds(leaf, 1.)
+        engine.layout_bounds(leaf, scale_factor)
     }
 
     #[test]
     fn layout_bounds_snap_authored_absolute_edges_independently() {
-        let bounds = absolute_leaf_bounds(13.25, 17.75, 113.5, 79.25);
+        let bounds = absolute_leaf_bounds(13.25, 17.75, 113.5, 79.25, 1.);
 
         assert_eq!(bounds.origin, point(px(13.), px(18.)));
         assert_eq!(bounds.size, size(px(114.), px(79.)));
-        assert_eq!(bounds.size.width - px(3. + 7.), px(104.));
+        // The padding box is covered by the hatch goldens.
     }
 
     #[test]
     fn layout_bounds_half_pixel_ties_match_chromium() {
         let lefts = [13., 13.25, 13.5, 13.75];
         let widths = lefts.map(|left| {
-            absolute_leaf_bounds(left, 17.5, 113.5, 79.5)
+            absolute_leaf_bounds(left, 17.5, 113.5, 79.5, 1.)
                 .size
                 .width
                 .0
         });
 
         assert_eq!(widths, [114., 114., 113., 113.]);
+    }
+
+    #[test]
+    fn layout_bounds_snap_authored_absolute_edges_on_css_grid_at_scale_two() {
+        let bounds = absolute_leaf_bounds(13.25, 17.75, 113.5, 79.25, 2.);
+
+        assert_eq!(bounds.origin, point(px(13.), px(18.)));
+        assert_eq!(bounds.size, size(px(114.), px(79.)));
+        assert_eq!(
+            (bounds.origin.x.0 * 2., bounds.right().0 * 2.),
+            (26., 254.)
+        );
+    }
+
+    #[test]
+    fn layout_bounds_half_pixel_ties_match_chromium_at_scale_two() {
+        let lefts = [13., 13.25, 13.5, 13.75];
+        let logical_widths = lefts.map(|left| {
+            absolute_leaf_bounds(left, 17.5, 113.5, 79.5, 2.)
+                .size
+                .width
+                .0
+        });
+        let device_widths = logical_widths.map(|width| width * 2.);
+
+        assert_eq!(logical_widths, [114., 114., 113., 113.]);
+        assert_eq!(device_widths, [228., 228., 226., 226.]);
     }
 
     fn fixed_intrinsic_leaf(tree: &mut GpuiTaffyTree, width: f32, height: f32) -> LayoutId {
@@ -1770,7 +1808,7 @@ mod tests {
         compute_test_layout_at_scale(&mut tree, root, scale_factor);
 
         let painted_baseline = |node: LayoutId, baseline: f32| {
-            let snapped_origin = round_to_device_pixel(tree.layout(node.0).location.y, 1.0);
+            let snapped_origin = round_half_up(tree.layout(node.0).location.y);
             round_to_device_pixel(snapped_origin + baseline * scale_factor, 1.0)
         };
         assert_eq!(

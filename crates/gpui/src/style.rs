@@ -10,6 +10,7 @@ use crate::{
     FontFallbacks, FontFeatures, FontStyle, FontWeight, GridLocation, Hsla, Length, Pixels, Point,
     PointRefinement, Rgba, SharedString, Size, SizeRefinement, Styled, TextRun, Window, black, phi,
     point, px, quad, rems, size,
+    util::round_half_up,
 };
 use collections::HashSet;
 use refineable::Refineable;
@@ -811,15 +812,19 @@ impl Style {
             border_color.a = 0.;
 
             // The CSS default `background-origin` is the padding box: the border
-            // box inset by the border widths. Round each logical edge first (this
-            // matches Chromium's layout-pixel snapping of the positioning area),
-            // then derive nonnegative dimensions from the rounded edges.
-            let padding_left = (bounds.origin.x + border_widths.left).round();
-            let padding_top = (bounds.origin.y + border_widths.top).round();
+            // box inset by the border widths. Round each logical edge half up
+            // (matching Chromium's layout-pixel snapping), then derive
+            // nonnegative dimensions from the rounded edges.
+            let padding_left = px(round_half_up((bounds.origin.x + border_widths.left).0));
+            let padding_top = px(round_half_up((bounds.origin.y + border_widths.top).0));
             let padding_right =
-                (bounds.origin.x + bounds.size.width - border_widths.right).round();
+                px(round_half_up(
+                    (bounds.origin.x + bounds.size.width - border_widths.right).0,
+                ));
             let padding_bottom =
-                (bounds.origin.y + bounds.size.height - border_widths.bottom).round();
+                px(round_half_up(
+                    (bounds.origin.y + bounds.size.height - border_widths.bottom).0,
+                ));
             let padding_area = Bounds {
                 origin: point(padding_left, padding_top),
                 size: size(

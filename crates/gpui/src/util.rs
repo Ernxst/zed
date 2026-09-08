@@ -127,8 +127,13 @@ pub(crate) fn atomic_incr_if_not_zero(counter: &AtomicUsize) -> usize {
 
 /// Rounds to the nearest integer with 0.5 ties toward positive infinity.
 #[inline]
+pub(crate) fn round_half_up(value: f32) -> f32 {
+    (value + 0.5).floor()
+}
+
+#[inline]
 pub(crate) fn round_to_device_pixel(logical: f32, scale_factor: f32) -> f32 {
-    (logical * scale_factor + 0.5).floor()
+    round_half_up(logical * scale_factor)
 }
 
 #[inline]
@@ -164,6 +169,10 @@ mod tests {
     #[test]
     fn test_round_to_device_pixel() {
         // Midpoint ties go toward positive infinity.
+        assert_eq!(round_half_up(0.5), 1.0);
+        assert_eq!(round_half_up(1.5), 2.0);
+        assert_eq!(round_half_up(-0.5), 0.0);
+        assert_eq!(round_half_up(-1.5), -1.0);
         assert_eq!(round_to_device_pixel(0.5, 1.0), 1.0);
         assert_eq!(round_to_device_pixel(1.5, 1.0), 2.0);
         assert_eq!(round_to_device_pixel(2.5, 1.0), 3.0);
