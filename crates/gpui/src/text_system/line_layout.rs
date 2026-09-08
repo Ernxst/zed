@@ -187,46 +187,60 @@ impl LineLayout {
         (left, right)
     }
 
+    /// Walks the glyphs of this line in run/glyph order, classifying each one as a wrap
+    /// candidate or not under the rule shared by greedy wrapping and min-content measurement:
+    /// a word character following a space is a candidate, as is any other non-space
+    /// character, but only once a non-whitespace glyph has been seen; newlines are never
+    /// candidates and do not update the word-boundary state.
+    fn wrap_candidates<'a>(
+        &'a self,
+        text: &'a str,
+    ) -> impl Iterator<Item = (WrapBoundary, char, Pixels, bool)> + 'a {
+        let mut first_non_whitespace = false;
+        let mut prev_ch = '\0';
+
+        self.runs
+            .iter()
+            .enumerate()
+            .flat_map(|(run_ix, run)| {
+                run.glyphs
+                    .iter()
+                    .enumerate()
+                    .map(move |(glyph_ix, glyph)| (WrapBoundary { run_ix, glyph_ix }, glyph))
+            })
+            .map(move |(boundary, glyph)| {
+                let ch = text[glyph.index..].chars().next().unwrap();
+                let x = glyph.position.x;
+
+                if ch == '\n' {
+                    return (boundary, ch, x, false);
+                }
+
+                let is_candidate = if LineWrapper::is_word_char(ch) {
+                    prev_ch == ' ' && ch != ' ' && first_non_whitespace
+                } else {
+                    ch != ' ' && first_non_whitespace
+                };
+
+                if ch != ' ' && !first_non_whitespace {
+                    first_non_whitespace = true;
+                }
+                prev_ch = ch;
+
+                (boundary, ch, x, is_candidate)
+            })
+    }
+
     /// The width of the widest unbreakable span in this line.
     pub fn min_content_width(&self, text: &str) -> Pixels {
         let mut widest_span = px(0.);
         let mut span_start_x = px(0.);
-        let mut first_non_whitespace_ix = None;
-        let mut last_candidate_x = None;
-        let mut prev_ch = '\0';
-        let mut glyphs = self
-            .runs
-            .iter()
-            .flat_map(|run| {
-                run.glyphs.iter().map(|glyph| {
-                    let character = text[glyph.index..].chars().next().unwrap();
-                    (character, glyph.position.x)
-                })
-            })
-            .peekable();
 
-        while let Some((ch, x)) = glyphs.next() {
-            if ch == '\n' {
-                continue;
+        for (_, _, x, is_candidate) in self.wrap_candidates(text) {
+            if is_candidate {
+                widest_span = widest_span.max(x - span_start_x);
+                span_start_x = x;
             }
-
-            if LineWrapper::is_word_char(ch) {
-                if prev_ch == ' ' && ch != ' ' && first_non_whitespace_ix.is_some() {
-                    last_candidate_x = Some(x);
-                }
-            } else if ch != ' ' && first_non_whitespace_ix.is_some() {
-                last_candidate_x = Some(x);
-            }
-
-            if ch != ' ' && first_non_whitespace_ix.is_none() {
-                first_non_whitespace_ix = Some(());
-            }
-
-            if let Some(candidate_x) = last_candidate_x.take() {
-                widest_span = widest_span.max(candidate_x - span_start_x);
-                span_start_x = candidate_x;
-            }
-            prev_ch = ch;
         }
 
         widest_span.max(self.width - span_start_x)
@@ -239,55 +253,25 @@ impl LineLayout {
         max_lines: Option<usize>,
     ) -> SmallVec<[WrapBoundary; 1]> {
         let mut boundaries = SmallVec::new();
-        let mut first_non_whitespace_ix = None;
-        let mut last_candidate_ix = None;
-        let mut last_candidate_x = px(0.);
+        let mut last_candidate = None;
         let mut last_boundary = WrapBoundary {
             run_ix: 0,
             glyph_ix: 0,
         };
         let mut last_boundary_x = px(0.);
-        let mut prev_ch = '\0';
-        let mut glyphs = self
-            .runs
-            .iter()
-            .enumerate()
-            .flat_map(move |(run_ix, run)| {
-                run.glyphs.iter().enumerate().map(move |(glyph_ix, glyph)| {
-                    let character = text[glyph.index..].chars().next().unwrap();
-                    (
-                        WrapBoundary { run_ix, glyph_ix },
-                        character,
-                        glyph.position.x,
-                    )
-                })
-            })
-            .peekable();
 
-        while let Some((boundary, ch, x)) = glyphs.next() {
+        let mut glyphs = self.wrap_candidates(text).peekable();
+
+        while let Some((boundary, ch, x, is_candidate)) = glyphs.next() {
             if ch == '\n' {
                 continue;
             }
 
-            // Here is very similar to `LineWrapper::wrap_line` to determine text wrapping,
-            // but there are some differences, so we have to duplicate the code here.
-            if LineWrapper::is_word_char(ch) {
-                if prev_ch == ' ' && ch != ' ' && first_non_whitespace_ix.is_some() {
-                    last_candidate_ix = Some(boundary);
-                    last_candidate_x = x;
-                }
-            } else {
-                if ch != ' ' && first_non_whitespace_ix.is_some() {
-                    last_candidate_ix = Some(boundary);
-                    last_candidate_x = x;
-                }
+            if is_candidate {
+                last_candidate = Some((boundary, x));
             }
 
-            if ch != ' ' && first_non_whitespace_ix.is_none() {
-                first_non_whitespace_ix = Some(boundary);
-            }
-
-            let next_x = glyphs.peek().map_or(self.width, |(_, _, x)| *x);
+            let next_x = glyphs.peek().map_or(self.width, |(_, _, x, _)| *x);
             let width = next_x - last_boundary_x;
 
             if width > wrap_width && boundary > last_boundary {
@@ -298,16 +282,15 @@ impl LineLayout {
                     break;
                 }
 
-                if let Some(last_candidate_ix) = last_candidate_ix.take() {
-                    last_boundary = last_candidate_ix;
-                    last_boundary_x = last_candidate_x;
+                if let Some((candidate_boundary, candidate_x)) = last_candidate.take() {
+                    last_boundary = candidate_boundary;
+                    last_boundary_x = candidate_x;
                 } else {
                     last_boundary = boundary;
                     last_boundary_x = x;
                 }
                 boundaries.push(last_boundary);
             }
-            prev_ch = ch;
         }
 
         boundaries

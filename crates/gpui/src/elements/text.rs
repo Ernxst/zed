@@ -685,7 +685,7 @@ impl TextLayout {
 
             move |known_dimensions, available_space, window, cx| {
                 let wrap_width = if whitespace_soft_wraps(text_style.white_space) {
-                    known_dimensions.width.or(match available_space.width {
+                    known_dimensions.width.or_else(|| match available_space.width {
                         crate::AvailableSpace::Definite(x) => Some(x),
                         crate::AvailableSpace::MinContent => window
                             .text_system()

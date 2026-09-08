@@ -1314,6 +1314,54 @@ mod tests {
                 assert!(text[..glyph.index].ends_with(' '));
             }
 
+            // The widest word ("pneumonoultramicroscopic") is not the last word on the
+            // line, so its wrap-candidate span runs to the start of the next word: the
+            // word plus the space that follows it. A browser hangs that trailing space,
+            // so the fork's min-content measures up to one space advance wider than the
+            // bare word whenever the widest word isn't last.
+            let widest_not_last = "pneumonoultramicroscopic aa bb";
+            let widest_not_last_lines = text_system
+                .shape_text(
+                    widest_not_last.into(),
+                    px(16.),
+                    &[TextRun {
+                        len: widest_not_last.len(),
+                        font: helvetica.clone(),
+                        ..Default::default()
+                    }],
+                    None,
+                    None,
+                )
+                .unwrap();
+            let widest_not_last_layout = &widest_not_last_lines[0].layout.unwrapped_layout;
+            let widest_not_last_expected = widest_not_last_layout
+                .x_for_index(widest_not_last.find("aa").unwrap())
+                - widest_not_last_layout.x_for_index(0);
+            assert_eq!(
+                widest_not_last_layout.min_content_width(widest_not_last),
+                widest_not_last_expected
+            );
+
+            let widest_not_last_wrapped = text_system
+                .shape_text(
+                    widest_not_last.into(),
+                    px(16.),
+                    &[TextRun {
+                        len: widest_not_last.len(),
+                        font: helvetica.clone(),
+                        ..Default::default()
+                    }],
+                    Some(widest_not_last_expected),
+                    None,
+                )
+                .unwrap();
+            for boundary in widest_not_last_wrapped[0].layout.wrap_boundaries() {
+                let glyph = &widest_not_last_wrapped[0].layout.unwrapped_layout.runs
+                    [boundary.run_ix]
+                    .glyphs[boundary.glyph_ix];
+                assert!(widest_not_last[..glyph.index].ends_with(' '));
+            }
+
             let single_word = "unbreakable";
             let single_line = text_system
                 .shape_text(
