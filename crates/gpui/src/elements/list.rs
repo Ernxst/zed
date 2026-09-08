@@ -11,7 +11,7 @@ use crate::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, DispatchPhase, Edges, Element, EntityId,
     ElementId, FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
     InteractiveElement, Interactivity, IntoElement, Overflow, Pixels, Point, ScrollWheelEvent,
-    Size, StatefulInteractiveElement, Style, StyleRefinement, Styled, Window, point, px, size,
+    Size, Style, StyleRefinement, Styled, Window, point, px, size,
 };
 use collections::VecDeque;
 use refineable::Refineable as _;
@@ -58,8 +58,6 @@ impl InteractiveElement for List {
         &mut self.interactivity
     }
 }
-
-impl StatefulInteractiveElement for List {}
 
 /// The list state that views must hold on behalf of the list element.
 #[derive(Clone)]
