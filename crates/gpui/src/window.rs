@@ -2257,6 +2257,11 @@ impl Window {
         }
     }
 
+    /// Reports whether the platform frame loop would redraw this window.
+    pub fn is_dirty(&self) -> bool {
+        self.invalidator.is_dirty()
+    }
+
     /// Close this window.
     pub fn remove_window(&mut self) {
         self.removed = true;
