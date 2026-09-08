@@ -3,7 +3,7 @@ use crate::{
     HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, TextOverflow,
     TextRun, TextStyle, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
-    WrappedLineLayout, register_tooltip_mouse_handlers, set_tooltip_on_window,
+    WrappedLineLayout, px, register_tooltip_mouse_handlers, set_tooltip_on_window,
 };
 use anyhow::Context as _;
 use gpui_util::ResultExt;
@@ -687,7 +687,18 @@ impl TextLayout {
                 let wrap_width = if whitespace_soft_wraps(text_style.white_space) {
                     known_dimensions.width.or(match available_space.width {
                         crate::AvailableSpace::Definite(x) => Some(x),
-                        _ => None,
+                        crate::AvailableSpace::MinContent => window
+                            .text_system()
+                            .shape_text(text.clone(), font_size, &runs, None, None)
+                            .log_err()
+                            .map(|lines| {
+                                lines.iter().fold(px(0.), |width, line| {
+                                    width.max(
+                                        line.layout.unwrapped_layout.min_content_width(&line.text),
+                                    )
+                                })
+                            }),
+                        crate::AvailableSpace::MaxContent => None,
                     })
                 } else {
                     None
@@ -714,7 +725,7 @@ impl TextLayout {
 
                 // Only use cached layout if:
                 // 1. We have a cached size
-                // 2. wrap_width matches (or both are None)
+                // 2. wrap_width matches
                 // 3. truncate_width is None (if truncate_width is Some, we need to re-layout
                 //    because the previous layout may have been computed without truncation)
                 // 4. the cached layout was not truncated (a truncated layout answers an
@@ -722,7 +733,7 @@ impl TextLayout {
                 //    sizing with whatever width some earlier measure pass happened to use)
                 if let Some(text_layout) = element_state.0.borrow().as_ref()
                     && let Some(size) = text_layout.size
-                    && (wrap_width.is_none() || wrap_width == text_layout.wrap_width)
+                    && wrap_width == text_layout.wrap_width
                     && truncate_width.is_none()
                     && text_layout.truncate_width.is_none()
                 {

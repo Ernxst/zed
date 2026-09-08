@@ -187,6 +187,51 @@ impl LineLayout {
         (left, right)
     }
 
+    /// The width of the widest unbreakable span in this line.
+    pub fn min_content_width(&self, text: &str) -> Pixels {
+        let mut widest_span = px(0.);
+        let mut span_start_x = px(0.);
+        let mut first_non_whitespace_ix = None;
+        let mut last_candidate_x = None;
+        let mut prev_ch = '\0';
+        let mut glyphs = self
+            .runs
+            .iter()
+            .flat_map(|run| {
+                run.glyphs.iter().map(|glyph| {
+                    let character = text[glyph.index..].chars().next().unwrap();
+                    (character, glyph.position.x)
+                })
+            })
+            .peekable();
+
+        while let Some((ch, x)) = glyphs.next() {
+            if ch == '\n' {
+                continue;
+            }
+
+            if LineWrapper::is_word_char(ch) {
+                if prev_ch == ' ' && ch != ' ' && first_non_whitespace_ix.is_some() {
+                    last_candidate_x = Some(x);
+                }
+            } else if ch != ' ' && first_non_whitespace_ix.is_some() {
+                last_candidate_x = Some(x);
+            }
+
+            if ch != ' ' && first_non_whitespace_ix.is_none() {
+                first_non_whitespace_ix = Some(());
+            }
+
+            if let Some(candidate_x) = last_candidate_x.take() {
+                widest_span = widest_span.max(candidate_x - span_start_x);
+                span_start_x = candidate_x;
+            }
+            prev_ch = ch;
+        }
+
+        widest_span.max(self.width - span_start_x)
+    }
+
     fn compute_wrap_boundaries(
         &self,
         text: &str,

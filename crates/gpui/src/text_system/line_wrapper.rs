@@ -1263,6 +1263,126 @@ mod tests {
         });
     }
 
+    #[cfg(target_os = "macos")]
+    #[crate::test]
+    fn test_min_content_width(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let text_system = WindowTextSystem::new(cx.text_system().clone());
+            let helvetica = font("Helvetica");
+
+            let text = "aa bbb cccc ddddd eeee";
+            let lines = text_system
+                .shape_text(
+                    text.into(),
+                    px(16.),
+                    &[TextRun {
+                        len: text.len(),
+                        font: helvetica.clone(),
+                        ..Default::default()
+                    }],
+                    None,
+                    None,
+                )
+                .unwrap();
+            let layout = &lines[0].layout.unwrapped_layout;
+            let word_starts = [0, 3, 7, 12, 18];
+            let expected_width = word_starts
+                .windows(2)
+                .map(|span| layout.x_for_index(span[1]) - layout.x_for_index(span[0]))
+                .chain(std::iter::once(
+                    layout.width - layout.x_for_index(*word_starts.last().unwrap()),
+                ))
+                .fold(px(0.), Pixels::max);
+            assert_eq!(layout.min_content_width(text), expected_width);
+
+            let wrapped = text_system
+                .shape_text(
+                    text.into(),
+                    px(16.),
+                    &[TextRun {
+                        len: text.len(),
+                        font: helvetica.clone(),
+                        ..Default::default()
+                    }],
+                    Some(expected_width),
+                    None,
+                )
+                .unwrap();
+            for boundary in wrapped[0].layout.wrap_boundaries() {
+                let glyph = &wrapped[0].layout.unwrapped_layout.runs[boundary.run_ix].glyphs
+                    [boundary.glyph_ix];
+                assert!(text[..glyph.index].ends_with(' '));
+            }
+
+            let single_word = "unbreakable";
+            let single_line = text_system
+                .shape_text(
+                    single_word.into(),
+                    px(16.),
+                    &[TextRun {
+                        len: single_word.len(),
+                        font: helvetica.clone(),
+                        ..Default::default()
+                    }],
+                    None,
+                    None,
+                )
+                .unwrap();
+            assert_eq!(
+                single_line[0]
+                    .layout
+                    .unwrapped_layout
+                    .min_content_width(single_word),
+                single_line[0].layout.unwrapped_layout.width
+            );
+
+            let cjk = "你好世界";
+            let cjk_lines = text_system
+                .shape_text(
+                    cjk.into(),
+                    px(16.),
+                    &[TextRun {
+                        len: cjk.len(),
+                        font: helvetica,
+                        ..Default::default()
+                    }],
+                    None,
+                    None,
+                )
+                .unwrap();
+            let cjk_layout = &cjk_lines[0].layout.unwrapped_layout;
+            let cjk_starts = [0, 3, 6, 9];
+            let cjk_expected_width = cjk_starts
+                .windows(2)
+                .map(|span| cjk_layout.x_for_index(span[1]) - cjk_layout.x_for_index(span[0]))
+                .chain(std::iter::once(
+                    cjk_layout.width - cjk_layout.x_for_index(9),
+                ))
+                .fold(px(0.), Pixels::max);
+            assert_eq!(cjk_layout.min_content_width(cjk), cjk_expected_width);
+
+            let cjk_wrapped = text_system
+                .shape_text(
+                    cjk.into(),
+                    px(16.),
+                    &[TextRun {
+                        len: cjk.len(),
+                        font: font("Helvetica"),
+                        ..Default::default()
+                    }],
+                    Some(cjk_expected_width),
+                    None,
+                )
+                .unwrap();
+            for boundary in cjk_wrapped[0].layout.wrap_boundaries() {
+                let glyph = &cjk_wrapped[0].layout.unwrapped_layout.runs[boundary.run_ix].glyphs
+                    [boundary.glyph_ix];
+                assert_eq!(glyph.index % 3, 0);
+                assert_ne!(glyph.index, 0);
+            }
+        });
+    }
+
     #[test]
     fn test_multiline_truncation_fits_within_wrapped_lines() {
         let mut wrapper = build_wrapper();
