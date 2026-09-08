@@ -1459,8 +1459,8 @@ mod tests {
                 position: Position::Absolute,
                 inset: Edges {
                     top: px(top).into(),
-                    right: Length::auto(),
-                    bottom: Length::auto(),
+                    right: Length::Auto,
+                    bottom: Length::Auto,
                     left: px(left).into(),
                 },
                 size: size(px(width).into(), px(height).into()),
