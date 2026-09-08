@@ -53,6 +53,8 @@ impl List {
     }
 }
 
+/// List uses `Interactivity` only for identity and accessibility state. Its
+/// layout, hitbox, and listener machinery do not run here.
 impl InteractiveElement for List {
     fn interactivity(&mut self) -> &mut Interactivity {
         &mut self.interactivity
@@ -1645,7 +1647,7 @@ impl Element for List {
 
     fn paint(
         &mut self,
-        _id: Option<&GlobalElementId>,
+        global_id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<crate::Pixels>,
         _: &mut Self::RequestLayoutState,
@@ -1653,6 +1655,18 @@ impl Element for List {
         window: &mut Window,
         cx: &mut App,
     ) {
+        // Accessibility actions are the one piece of Interactivity listener
+        // plumbing that List runs; its other listener machinery remains unused.
+        if window.a11y.is_active()
+            && let Some(global_id) = global_id
+            && !self.interactivity.a11y_action_listeners.is_empty()
+        {
+            let node_id = global_id.accesskit_node_id();
+            for (action, listener) in self.interactivity.a11y_action_listeners.drain(..) {
+                window.on_a11y_action(node_id, action, listener);
+            }
+        }
+
         let current_view = window.current_view();
 
         // Register the scroll listener before painting children so that, in
