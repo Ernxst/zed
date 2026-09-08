@@ -10,21 +10,40 @@ use metal::Device;
 use parking_lot::Mutex;
 use std::borrow::Cow;
 
-pub struct MetalAtlas(Mutex<MetalAtlasState>);
+pub struct MetalAtlas {
+    state: Mutex<MetalAtlasState>,
+    last_submission: Mutex<Option<AssertSend<metal::CommandBuffer>>>,
+}
 
 impl MetalAtlas {
     pub(crate) fn new(device: Device, is_apple_gpu: bool) -> Self {
-        MetalAtlas(Mutex::new(MetalAtlasState {
-            device: AssertSend(device),
-            is_apple_gpu,
-            monochrome_textures: Default::default(),
-            polychrome_textures: Default::default(),
-            tiles_by_key: Default::default(),
-        }))
+        Self {
+            state: Mutex::new(MetalAtlasState {
+                device: AssertSend(device),
+                is_apple_gpu,
+                monochrome_textures: Default::default(),
+                polychrome_textures: Default::default(),
+                tiles_by_key: Default::default(),
+            }),
+            last_submission: Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn track_submission(&self, command_buffer: &metal::CommandBufferRef) {
+        *self.last_submission.lock() = Some(AssertSend(command_buffer.to_owned()));
+    }
+
+    fn wait_for_pending_submissions(&self) {
+        // All frames use one ordered Metal command queue. Waiting for the most
+        // recent submission also completes every older frame that could sample
+        // an atlas tile before replace_region mutates it in place.
+        if let Some(command_buffer) = self.last_submission.lock().take() {
+            command_buffer.wait_until_completed();
+        }
     }
 
     pub(crate) fn metal_texture(&self, id: AtlasTextureId) -> metal::Texture {
-        self.0.lock().texture(id).metal_texture.clone()
+        self.state.lock().texture(id).metal_texture.clone()
     }
 }
 
@@ -42,7 +61,7 @@ impl PlatformAtlas for MetalAtlas {
         key: &AtlasKey,
         build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
     ) -> Result<Option<AtlasTile>> {
-        let mut lock = self.0.lock();
+        let mut lock = self.state.lock();
         if let Some(tile) = lock.tiles_by_key.get(key) {
             Ok(Some(*tile))
         } else {
@@ -59,8 +78,27 @@ impl PlatformAtlas for MetalAtlas {
         }
     }
 
+    fn update(
+        &self,
+        key: &AtlasKey,
+        size: Size<DevicePixels>,
+        bytes: &[u8],
+    ) -> Result<Option<AtlasTile>> {
+        self.wait_for_pending_submissions();
+        let lock = self.state.lock();
+        if let Some(tile) = lock.tiles_by_key.get(key).copied() {
+            if tile.bounds.size == size {
+                lock.texture(tile.texture_id).upload(tile.bounds, bytes);
+                return Ok(Some(tile));
+            }
+        }
+        drop(lock);
+        self.remove(key);
+        self.get_or_insert_with(key, &mut || Ok(Some((size, Cow::Borrowed(bytes)))))
+    }
+
     fn remove(&self, key: &AtlasKey) {
-        let mut lock = self.0.lock();
+        let mut lock = self.state.lock();
         let Some(tile) = lock.tiles_by_key.remove(key) else {
             return;
         };
@@ -298,6 +336,45 @@ mod tests {
             })
             .expect("allocation should succeed")
             .expect("callback returns Some")
+    }
+
+    #[test]
+    fn test_update_waits_for_the_latest_gpu_submission() {
+        let Some(device) = metal::Device::system_default() else {
+            return;
+        };
+        let atlas = MetalAtlas::new(device.clone(), true);
+        let queue = device.new_command_queue();
+        let command_buffer = queue.new_command_buffer();
+        atlas.track_submission(command_buffer);
+        command_buffer.commit();
+
+        atlas.wait_for_pending_submissions();
+
+        assert_eq!(
+            command_buffer.status(),
+            metal::MTLCommandBufferStatus::Completed
+        );
+    }
+
+    #[test]
+    fn test_update_reuses_same_sized_tile() {
+        let Some(atlas) = create_atlas() else {
+            return;
+        };
+        let image_size = Size {
+            width: DevicePixels(2),
+            height: DevicePixels(1),
+        };
+        let key = make_image_key(1, 0);
+        let initial_tile = insert_tile(&atlas, &key, image_size);
+
+        let updated_tile = atlas
+            .update(&key, image_size, &[0, 0, 0, 255, 255, 255, 255, 255])
+            .expect("upload should succeed")
+            .expect("tile should exist");
+
+        assert_eq!(updated_tile, initial_tile);
     }
 
     #[test]

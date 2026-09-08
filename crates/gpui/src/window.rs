@@ -3099,6 +3099,14 @@ impl Window {
         profiling::finish_frame!();
     }
 
+    /// Presents the current scene again without drawing or invalidating views.
+    ///
+    /// This is intended for stable scenes whose external GPU resources changed,
+    /// such as an atlas image updated in place.
+    pub fn present_cached_frame(&mut self) {
+        self.present();
+    }
+
     /// Presents the most recently drawn frame if it hasn't been presented yet.
     ///
     /// Benchmarks drive drawing synchronously rather than through a platform
@@ -4487,7 +4495,7 @@ impl Window {
 
             self.next_frame.scene.insert_primitive(PolychromeSprite {
                 order: 0,
-                pad: 0,
+                nearest_neighbor: false.into(),
                 grayscale: false.into(),
                 bounds,
                 corner_radii: Default::default(),
@@ -4581,6 +4589,48 @@ impl Window {
         frame_index: usize,
         grayscale: bool,
     ) -> Result<()> {
+        self.paint_image_with_sampling(
+            bounds,
+            image_bounds,
+            corner_radii,
+            data,
+            frame_index,
+            grayscale,
+            false,
+        )
+    }
+
+    /// Paint an image with nearest-neighbor sampling.
+    pub fn paint_image_nearest(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        image_bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        data: Arc<RenderImage>,
+        frame_index: usize,
+        grayscale: bool,
+    ) -> Result<()> {
+        self.paint_image_with_sampling(
+            bounds,
+            image_bounds,
+            corner_radii,
+            data,
+            frame_index,
+            grayscale,
+            true,
+        )
+    }
+
+    fn paint_image_with_sampling(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        image_bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        data: Arc<RenderImage>,
+        frame_index: usize,
+        grayscale: bool,
+        nearest_neighbor: bool,
+    ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
         let visible_bounds = bounds.intersect(&image_bounds);
@@ -4659,7 +4709,7 @@ impl Window {
 
         self.next_frame.scene.insert_primitive(PolychromeSprite {
             order: 0,
-            pad: 0,
+            nearest_neighbor: nearest_neighbor.into(),
             grayscale: grayscale.into(),
             bounds: visible_bounds_snapped,
             content_mask,
@@ -4718,6 +4768,33 @@ impl Window {
             texture,
             texture_size,
         });
+    }
+
+    /// Uploads new pixels for an image, retaining same-sized atlas tiles when possible.
+    ///
+    /// `data.id` must match the image already referenced by the current scene. Returns whether
+    /// every frame kept its existing atlas tile. When this returns `true`,
+    /// [`Self::present_cached_frame`] can present the updated pixels without redrawing.
+    pub fn update_image(&mut self, data: Arc<RenderImage>) -> Result<bool> {
+        let mut retained_all_tiles = data.frame_count() > 0;
+        for frame_index in 0..data.frame_count() {
+            let params = RenderImageParams {
+                image_id: data.id,
+                frame_index,
+            };
+            let key = params.into();
+            let previous_tile = self
+                .sprite_atlas
+                .get_or_insert_with(&key, &mut || Ok(None))?;
+            let bytes = data
+                .as_bytes(frame_index)
+                .ok_or_else(|| anyhow!("missing image frame {frame_index}"))?;
+            let updated_tile = self
+                .sprite_atlas
+                .update(&key, data.size(frame_index), bytes)?;
+            retained_all_tiles &= previous_tile.is_some() && previous_tile == updated_tile;
+        }
+        Ok(retained_all_tiles)
     }
 
     /// Removes an image from the sprite atlas.

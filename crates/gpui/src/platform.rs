@@ -1360,6 +1360,18 @@ pub trait PlatformAtlas {
         key: &AtlasKey,
         build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
     ) -> Result<Option<AtlasTile>>;
+
+    /// Replace a tile's pixels while retaining its atlas allocation when the size is unchanged.
+    fn update(
+        &self,
+        key: &AtlasKey,
+        size: Size<DevicePixels>,
+        bytes: &[u8],
+    ) -> Result<Option<AtlasTile>> {
+        self.remove(key);
+        self.get_or_insert_with(key, &mut || Ok(Some((size, Cow::Borrowed(bytes)))))
+    }
+
     fn remove(&self, key: &AtlasKey);
 
     #[cfg(any(test, feature = "test-support"))]
