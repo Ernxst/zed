@@ -2262,6 +2262,11 @@ impl Window {
         self.invalidator.is_dirty()
     }
 
+    /// Whether the platform frame loop would draw another frame: the window is dirty or next-frame callbacks are pending.
+    pub fn needs_frame(&self) -> bool {
+        self.invalidator.is_dirty() || !self.next_frame_callbacks.borrow().is_empty()
+    }
+
     /// Close this window.
     pub fn remove_window(&mut self) {
         self.removed = true;
