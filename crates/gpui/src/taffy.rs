@@ -880,9 +880,12 @@ impl ToTaffy<taffy::style::Style> for Style {
             }
         }
 
-        fn to_min_track(track: &GridTrackMin) -> taffy::style::MinTrackSizingFunction {
+        fn to_min_track(
+            track: &GridTrackMin,
+            scale_factor: f32,
+        ) -> taffy::style::MinTrackSizingFunction {
             match track {
-                GridTrackMin::Px(value) => length(value.0),
+                GridTrackMin::Px(value) => length(value.0 * scale_factor),
                 GridTrackMin::Percent(value) => percent(*value),
                 GridTrackMin::Auto => auto(),
                 GridTrackMin::MinContent => min_content(),
@@ -890,9 +893,12 @@ impl ToTaffy<taffy::style::Style> for Style {
             }
         }
 
-        fn to_max_track(track: &GridTrackMax) -> taffy::style::MaxTrackSizingFunction {
+        fn to_max_track(
+            track: &GridTrackMax,
+            scale_factor: f32,
+        ) -> taffy::style::MaxTrackSizingFunction {
             match track {
-                GridTrackMax::Px(value) => length(value.0),
+                GridTrackMax::Px(value) => length(value.0 * scale_factor),
                 GridTrackMax::Percent(value) => percent(*value),
                 GridTrackMax::Fr(value) => fr(*value),
                 GridTrackMax::Auto => auto(),
@@ -901,9 +907,13 @@ impl ToTaffy<taffy::style::Style> for Style {
             }
         }
 
-        fn to_track(track: &GridTrack, rem_size: Pixels) -> taffy::style::TrackSizingFunction {
+        fn to_track(
+            track: &GridTrack,
+            rem_size: Pixels,
+            scale_factor: f32,
+        ) -> taffy::style::TrackSizingFunction {
             match track {
-                GridTrack::Px(value) => length(value.0),
+                GridTrack::Px(value) => length(value.0 * scale_factor),
                 GridTrack::Percent(value) => percent(*value),
                 GridTrack::Fr(value) => fr(*value),
                 GridTrack::Auto => auto(),
@@ -911,30 +921,35 @@ impl ToTaffy<taffy::style::Style> for Style {
                 GridTrack::MaxContent => max_content(),
                 GridTrack::FitContent(limit) => match limit {
                     DefiniteLength::Absolute(value) => {
-                        fit_content(length(value.to_pixels(rem_size).0))
+                        let pixels: f32 = value.to_taffy(rem_size, scale_factor);
+                        fit_content(length(pixels))
                     }
                     DefiniteLength::Fraction(value) => fit_content(percent(*value)),
                 },
-                GridTrack::MinMax { min, max } => minmax(to_min_track(min), to_max_track(max)),
+                GridTrack::MinMax { min, max } => minmax(
+                    to_min_track(min, scale_factor),
+                    to_max_track(max, scale_factor),
+                ),
             }
         }
 
         fn to_grid_template<T: taffy::style::CheapCloneStr>(
             template: &Option<GridTemplate>,
             rem_size: Pixels,
+            scale_factor: f32,
         ) -> Vec<taffy::GridTemplateComponent<T>> {
             template
                 .iter()
                 .flat_map(|template| template.tracks.iter())
                 .map(|component| match component {
-                    GridTemplateComponent::Track(track) => {
-                        taffy::GridTemplateComponent::Single(to_track(track, rem_size))
-                    }
+                    GridTemplateComponent::Track(track) => taffy::GridTemplateComponent::Single(
+                        to_track(track, rem_size, scale_factor),
+                    ),
                     GridTemplateComponent::Repeat { count, tracks } => repeat(
                         *count,
                         tracks
                             .iter()
-                            .map(|track| to_track(track, rem_size))
+                            .map(|track| to_track(track, rem_size, scale_factor))
                             .collect(),
                     ),
                 })
@@ -964,8 +979,8 @@ impl ToTaffy<taffy::style::Style> for Style {
             flex_basis: self.flex_basis.to_taffy(rem_size, scale_factor),
             flex_grow: self.flex_grow,
             flex_shrink: self.flex_shrink,
-            grid_template_rows: to_grid_template(&self.grid_rows, rem_size),
-            grid_template_columns: to_grid_template(&self.grid_cols, rem_size),
+            grid_template_rows: to_grid_template(&self.grid_rows, rem_size, scale_factor),
+            grid_template_columns: to_grid_template(&self.grid_cols, rem_size, scale_factor),
             grid_row: self
                 .grid_location
                 .as_ref()
@@ -1208,7 +1223,7 @@ impl From<Size<Pixels>> for Size<AvailableSpace> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Position, point, px};
+    use crate::{Position, point, px, rems};
     use taffy::{
         AlignContent, AlignItems, FlexDirection, FlexWrap, RequestedAxis, style_helpers::length,
         tree::SizingMode,
@@ -1914,6 +1929,13 @@ mod tests {
                     GridTemplateComponent::Track(GridTrack::FitContent(DefiniteLength::Absolute(
                         px(120.).into(),
                     ))),
+                    GridTemplateComponent::Track(GridTrack::FitContent(DefiniteLength::Absolute(
+                        rems(2.).into(),
+                    ))),
+                    GridTemplateComponent::Track(GridTrack::MinMax {
+                        min: GridTrackMin::Px(px(0.)),
+                        max: GridTrackMax::Fr(1.),
+                    }),
                     GridTemplateComponent::Track(GridTrack::MinMax {
                         min: GridTrackMin::Percent(0.1),
                         max: GridTrackMax::Percent(0.9),
@@ -1944,6 +1966,8 @@ mod tests {
                 taffy::GridTemplateComponent::Single(max_content()),
                 taffy::GridTemplateComponent::Single(percent(0.25)),
                 taffy::GridTemplateComponent::Single(fit_content(length(120.))),
+                taffy::GridTemplateComponent::Single(fit_content(length(32.))),
+                taffy::GridTemplateComponent::Single(minmax(length(0.), fr(1.))),
                 taffy::GridTemplateComponent::Single(minmax(percent(0.1), percent(0.9))),
                 taffy::GridTemplateComponent::Single(taffy::style_helpers::auto()),
                 repeat(
@@ -1957,6 +1981,18 @@ mod tests {
             vec![taffy::GridTemplateComponent::Single(
                 taffy::style_helpers::min_content(),
             )]
+        );
+
+        let scaled_style = Style {
+            grid_cols: Some(GridTemplate {
+                tracks: vec![GridTemplateComponent::Track(GridTrack::Px(px(48.)))],
+            }),
+            ..Default::default()
+        };
+        let scaled_taffy_style: taffy::style::Style = scaled_style.to_taffy(px(16.), 2.);
+        assert_eq!(
+            scaled_taffy_style.grid_template_columns,
+            vec![taffy::GridTemplateComponent::Single(length(96.))]
         );
     }
 }
