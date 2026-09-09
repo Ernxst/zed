@@ -144,6 +144,8 @@ impl ObjectFit {
 pub enum GridTrack {
     /// A fixed pixel track.
     Px(Pixels),
+    /// A percentage of the grid container's size.
+    Percent(f32),
     /// A flexible fraction of the remaining space.
     Fr(f32),
     /// A track sized by the grid algorithm.
@@ -152,6 +154,8 @@ pub enum GridTrack {
     MinContent,
     /// A track sized to its maximum content contribution.
     MaxContent,
+    /// A track clamped to its content contributions by a length-percentage limit.
+    FitContent(DefiniteLength),
     /// A track with independent lower and upper sizing bounds.
     MinMax {
         /// The lower bound.
@@ -166,6 +170,8 @@ pub enum GridTrack {
 pub enum GridTrackMin {
     /// A fixed pixel lower bound.
     Px(Pixels),
+    /// A percentage of the grid container's size.
+    Percent(f32),
     /// An automatically sized lower bound.
     Auto,
     /// A minimum-content lower bound.
@@ -179,6 +185,8 @@ pub enum GridTrackMin {
 pub enum GridTrackMax {
     /// A fixed pixel upper bound.
     Px(Pixels),
+    /// A percentage of the grid container's size.
+    Percent(f32),
     /// A flexible fraction upper bound.
     Fr(f32),
     /// An automatically sized upper bound.
