@@ -9,8 +9,7 @@ use crate::{
     CornersRefinement, CursorStyle, DefiniteLength, DevicePixels, Edges, EdgesRefinement, Font,
     FontFallbacks, FontFeatures, FontStyle, FontWeight, GridLocation, Hsla, Length, Pixels, Point,
     PointRefinement, Rgba, SharedString, Size, SizeRefinement, Styled, TextRun, Window, black, phi,
-    point, px, quad, rems, size,
-    util::round_half_up,
+    point, px, quad, rems, size, util::round_half_up,
 };
 use collections::HashSet;
 use refineable::Refineable;
@@ -197,6 +196,24 @@ pub enum GridTrackMax {
     MaxContent,
 }
 
+/// Controls whether grid items are placed row-wise or column-wise, and whether the sparse
+/// or dense packing algorithm is used.
+///
+/// [MDN](https://developer.mozilla.org/en-US/docs/Web/CSS/grid-auto-flow)
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
+// Copy of taffy::style type of the same name, to derive JsonSchema.
+pub enum GridAutoFlow {
+    /// Items are placed by filling each row in turn, adding new rows as necessary
+    #[default]
+    Row,
+    /// Items are placed by filling each column in turn, adding new columns as necessary
+    Column,
+    /// Combines `Row` with the dense packing algorithm
+    RowDense,
+    /// Combines `Column` with the dense packing algorithm
+    ColumnDense,
+}
+
 /// One component of a CSS Grid `grid-template-*` track list.
 #[derive(Clone, PartialEq, Debug, JsonSchema, Serialize, Deserialize)]
 pub enum GridTemplateComponent {
@@ -303,6 +320,12 @@ pub struct Style {
     pub align_content: Option<AlignContent>,
     /// How should contained within this item be aligned in the main/inline axis
     pub justify_content: Option<JustifyContent>,
+    /// How this node's children should be aligned in the inline axis. Only applies to Grid;
+    /// ignored by Flexbox.
+    pub justify_items: Option<JustifyItems>,
+    /// How this node should be aligned in the inline axis. Falls back to the parent's
+    /// [`JustifyItems`] if not set. Only applies to Grid; ignored by Flexbox.
+    pub justify_self: Option<JustifySelf>,
     /// How large should the gaps between items in a flex container be?
     #[refineable]
     pub gap: Size<DefiniteLength>,
@@ -364,6 +387,16 @@ pub struct Style {
 
     /// The grid location of this element
     pub grid_location: Option<GridLocation>,
+
+    /// Whether grid items are auto-placed row-wise or column-wise, and whether the sparse or
+    /// dense packing algorithm is used
+    pub grid_auto_flow: Option<GridAutoFlow>,
+
+    /// The size of rows implicitly created by auto-placed grid items
+    pub grid_auto_rows: Option<Vec<GridTrack>>,
+
+    /// The size of columns implicitly created by auto-placed grid items
+    pub grid_auto_columns: Option<Vec<GridTrack>>,
 
     /// Whether to draw a red debugging outline around this element
     #[cfg(debug_assertions)]
@@ -825,14 +858,12 @@ impl Style {
             // nonnegative dimensions from the rounded edges.
             let padding_left = px(round_half_up((bounds.origin.x + border_widths.left).0));
             let padding_top = px(round_half_up((bounds.origin.y + border_widths.top).0));
-            let padding_right =
-                px(round_half_up(
-                    (bounds.origin.x + bounds.size.width - border_widths.right).0,
-                ));
-            let padding_bottom =
-                px(round_half_up(
-                    (bounds.origin.y + bounds.size.height - border_widths.bottom).0,
-                ));
+            let padding_right = px(round_half_up(
+                (bounds.origin.x + bounds.size.width - border_widths.right).0,
+            ));
+            let padding_bottom = px(round_half_up(
+                (bounds.origin.y + bounds.size.height - border_widths.bottom).0,
+            ));
             let padding_area = Bounds {
                 origin: point(padding_left, padding_top),
                 size: size(
@@ -937,6 +968,8 @@ impl Default for Style {
             align_self: None,
             align_content: None,
             justify_content: None,
+            justify_items: None,
+            justify_self: None,
             // Flexbox
             flex_direction: FlexDirection::Row,
             flex_wrap: FlexWrap::NoWrap,
@@ -957,6 +990,9 @@ impl Default for Style {
             grid_rows: None,
             grid_cols: None,
             grid_location: None,
+            grid_auto_flow: None,
+            grid_auto_rows: None,
+            grid_auto_columns: None,
 
             #[cfg(debug_assertions)]
             debug: false,
@@ -1401,6 +1437,17 @@ impl From<AlignItems> for taffy::style::AlignItems {
             AlignItems::Center => Self::CENTER,
             AlignItems::Baseline => Self::BASELINE,
             AlignItems::Stretch => Self::STRETCH,
+        }
+    }
+}
+
+impl From<GridAutoFlow> for taffy::style::GridAutoFlow {
+    fn from(value: GridAutoFlow) -> Self {
+        match value {
+            GridAutoFlow::Row => Self::Row,
+            GridAutoFlow::Column => Self::Column,
+            GridAutoFlow::RowDense => Self::RowDense,
+            GridAutoFlow::ColumnDense => Self::ColumnDense,
         }
     }
 }

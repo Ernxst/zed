@@ -513,7 +513,8 @@ impl TaffyLayoutEngine {
         let calc_lengths = calc_lengths(&style);
         let taffy_style = style.to_taffy(rem_size, scale_factor);
 
-        self.taffy.new_node(taffy_style, calc_lengths, children, None)
+        self.taffy
+            .new_node(taffy_style, calc_lengths, children, None)
     }
 
     pub fn request_measured_layout(
@@ -570,8 +571,12 @@ impl TaffyLayoutEngine {
         #[cfg(feature = "stacker")]
         let measure = StackSafe::new(measure);
 
-        self.taffy
-            .new_node(taffy_style, calc_lengths, &[], Some(NodeContext::Dynamic(measure)))
+        self.taffy.new_node(
+            taffy_style,
+            calc_lengths,
+            &[],
+            Some(NodeContext::Dynamic(measure)),
+        )
     }
 
     /// Treats any `auto` dimension of the given node's style as filling `size`.
@@ -973,6 +978,8 @@ impl ToTaffy<taffy::style::Style> for Style {
             align_self: self.align_self.map(|x| x.into()),
             align_content: self.align_content.map(|x| x.into()),
             justify_content: self.justify_content.map(|x| x.into()),
+            justify_items: self.justify_items.map(|x| x.into()),
+            justify_self: self.justify_self.map(|x| x.into()),
             gap: self.gap.to_taffy(rem_size, scale_factor),
             flex_direction: self.flex_direction.into(),
             flex_wrap: self.flex_wrap.into(),
@@ -990,6 +997,27 @@ impl ToTaffy<taffy::style::Style> for Style {
                 .grid_location
                 .as_ref()
                 .map(|location| to_grid_line(&location.column))
+                .unwrap_or_default(),
+            grid_auto_flow: self.grid_auto_flow.map(|x| x.into()).unwrap_or_default(),
+            grid_auto_rows: self
+                .grid_auto_rows
+                .as_ref()
+                .map(|tracks| {
+                    tracks
+                        .iter()
+                        .map(|track| to_track(track, rem_size, scale_factor))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            grid_auto_columns: self
+                .grid_auto_columns
+                .as_ref()
+                .map(|tracks| {
+                    tracks
+                        .iter()
+                        .map(|track| to_track(track, rem_size, scale_factor))
+                        .collect()
+                })
                 .unwrap_or_default(),
             ..Default::default()
         }
@@ -1223,7 +1251,7 @@ impl From<Size<Pixels>> for Size<AvailableSpace> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Position, point, px, rems};
+    use crate::{GridAutoFlow, JustifyItems, JustifySelf, Position, point, px, rems};
     use taffy::{
         AlignContent, AlignItems, FlexDirection, FlexWrap, RequestedAxis, style_helpers::length,
         tree::SizingMode,
@@ -1574,10 +1602,7 @@ mod tests {
 
         assert_eq!(bounds.origin, point(px(13.), px(18.)));
         assert_eq!(bounds.size, size(px(114.), px(79.)));
-        assert_eq!(
-            (bounds.origin.x.0 * 2., bounds.right().0 * 2.),
-            (26., 254.)
-        );
+        assert_eq!((bounds.origin.x.0 * 2., bounds.right().0 * 2.), (26., 254.));
     }
 
     #[test]
@@ -1726,8 +1751,7 @@ mod tests {
         // Stock Taffy's nine-slot cache reaches 201487/520 at depth 6 versus
         // 5500/18 with width partitions, so this checks shape rather than time.
         assert_eq!(
-            counts[3].1,
-            counts[1].1,
+            counts[3].1, counts[1].1,
             "per-node work must not compound between two and six wrappers"
         );
     }
@@ -1993,6 +2017,40 @@ mod tests {
         assert_eq!(
             scaled_taffy_style.grid_template_columns,
             vec![taffy::GridTemplateComponent::Single(length(96.))]
+        );
+    }
+
+    #[test]
+    fn grid_auto_flow_tracks_and_justification_map_to_taffy() {
+        use taffy::style_helpers::length;
+
+        let style = Style {
+            grid_auto_flow: Some(GridAutoFlow::ColumnDense),
+            grid_auto_rows: Some(vec![GridTrack::Px(px(40.)), GridTrack::Fr(1.)]),
+            grid_auto_columns: Some(vec![GridTrack::Px(px(50.))]),
+            justify_items: Some(JustifyItems::Center),
+            justify_self: Some(JustifySelf::End),
+            ..Default::default()
+        };
+
+        let taffy_style: taffy::style::Style = style.to_taffy(px(16.), 2.);
+
+        assert_eq!(
+            taffy_style.grid_auto_flow,
+            taffy::style::GridAutoFlow::ColumnDense
+        );
+        assert_eq!(
+            taffy_style.grid_auto_rows,
+            vec![length(80.), taffy::style_helpers::fr(1.)]
+        );
+        assert_eq!(taffy_style.grid_auto_columns, vec![length(100.)]);
+        assert_eq!(
+            taffy_style.justify_items,
+            Some(taffy::style::AlignItems::CENTER)
+        );
+        assert_eq!(
+            taffy_style.justify_self,
+            Some(taffy::style::AlignItems::END)
         );
     }
 }
