@@ -16,6 +16,7 @@ pub enum Event {
     #[cfg_attr(feature = "x11", allow(dead_code))]
     CursorSize(u32),
     ButtonLayout(String),
+    ReduceMotion(bool),
 }
 
 pub struct XDPEventSource {
@@ -114,6 +115,60 @@ impl XDPEventSource {
                             anyhow::Ok(())
                         })
                         .detach();
+                }
+
+                // Prefer the freedesktop key (implemented by KDE's portal); fall back to the
+                // GNOME key (the same GSettings value GTK's `gtk-enable-animations` reflects)
+                // when the freedesktop key cannot be read. Whichever key was readable at
+                // startup is also the one watched for live changes.
+                if let Ok(initial_reduced_motion) = settings
+                    .read::<u32>("org.freedesktop.appearance", "reduced-motion")
+                    .await
+                {
+                    sender.send(Event::ReduceMotion(initial_reduced_motion == 1))?;
+
+                    if let Ok(mut reduced_motion_changed) = settings
+                        .receive_setting_changed_with_args::<u32>(
+                            "org.freedesktop.appearance",
+                            "reduced-motion",
+                        )
+                        .await
+                    {
+                        let sender = sender.clone();
+                        background
+                            .spawn(async move {
+                                while let Some(value) = reduced_motion_changed.next().await {
+                                    let value = value?;
+                                    sender.send(Event::ReduceMotion(value == 1))?;
+                                }
+                                anyhow::Ok(())
+                            })
+                            .detach();
+                    }
+                } else if let Ok(initial_enable_animations) = settings
+                    .read::<bool>("org.gnome.desktop.interface", "enable-animations")
+                    .await
+                {
+                    sender.send(Event::ReduceMotion(!initial_enable_animations))?;
+
+                    if let Ok(mut enable_animations_changed) = settings
+                        .receive_setting_changed_with_args::<bool>(
+                            "org.gnome.desktop.interface",
+                            "enable-animations",
+                        )
+                        .await
+                    {
+                        let sender = sender.clone();
+                        background
+                            .spawn(async move {
+                                while let Some(enabled) = enable_animations_changed.next().await {
+                                    let enabled = enabled?;
+                                    sender.send(Event::ReduceMotion(!enabled))?;
+                                }
+                                anyhow::Ok(())
+                            })
+                            .detach();
+                    }
                 }
 
                 let mut appearance_changed = settings.receive_color_scheme_changed().await?;

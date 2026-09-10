@@ -506,6 +506,23 @@ impl X11Client {
                     XDPEvent::CursorTheme(_) | XDPEvent::CursorSize(_) => {
                         // noop, X11 manages this for us.
                     }
+                    XDPEvent::ReduceMotion(reduce_motion) => {
+                        let changed = client.with_common(|common| {
+                            let changed = common.reduce_motion != reduce_motion;
+                            common.reduce_motion = reduce_motion;
+                            changed
+                        });
+                        if changed {
+                            let callback = client
+                                .with_common(|common| common.callbacks.reduce_motion_change.take());
+                            if let Some(mut callback) = callback {
+                                callback();
+                                client.with_common(|common| {
+                                    common.callbacks.reduce_motion_change = Some(callback)
+                                });
+                            }
+                        }
+                    }
                 }
             })
             .map_err(|err| anyhow!("Failed to initialize XDP event source: {err:?}"))?;

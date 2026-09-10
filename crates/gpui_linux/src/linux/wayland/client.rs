@@ -889,6 +889,22 @@ impl WaylandClient {
                             client.cursor.set_size(size);
                         }
                     }
+                    XDPEvent::ReduceMotion(reduce_motion) => {
+                        if let Some(client) = client.0.upgrade() {
+                            let mut state = client.borrow_mut();
+                            if state.common.reduce_motion != reduce_motion {
+                                state.common.reduce_motion = reduce_motion;
+                                if let Some(mut callback) =
+                                    state.common.callbacks.reduce_motion_change.take()
+                                {
+                                    drop(state);
+                                    callback();
+                                    state = client.borrow_mut();
+                                    state.common.callbacks.reduce_motion_change = Some(callback);
+                                }
+                            }
+                        }
+                    }
                 }
             })
             .unwrap();

@@ -113,6 +113,7 @@ pub(crate) struct PlatformHandlers {
     pub(crate) validate_app_menu_command: Option<Box<dyn FnMut(&dyn Action) -> bool>>,
     pub(crate) keyboard_layout_change: Option<Box<dyn FnMut()>>,
     pub(crate) system_wake: Option<Box<dyn FnMut()>>,
+    pub(crate) reduce_motion_change: Option<Box<dyn FnMut()>>,
 }
 
 pub(crate) struct LinuxCommon {
@@ -120,6 +121,7 @@ pub(crate) struct LinuxCommon {
     pub(crate) foreground_executor: ForegroundExecutor,
     pub(crate) text_system: Arc<dyn PlatformTextSystem>,
     pub(crate) appearance: WindowAppearance,
+    pub(crate) reduce_motion: bool,
     pub(crate) auto_hide_scrollbars: bool,
     pub(crate) button_layout: WindowButtonLayout,
     pub(crate) callbacks: PlatformHandlers,
@@ -162,6 +164,7 @@ impl LinuxCommon {
             foreground_executor: ForegroundExecutor::new(dispatcher),
             text_system,
             appearance: WindowAppearance::Light,
+            reduce_motion: false,
             auto_hide_scrollbars: false,
             button_layout: WindowButtonLayout::linux_default(),
             callbacks,
@@ -722,6 +725,15 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
 
     fn window_appearance(&self) -> WindowAppearance {
         self.inner.with_common(|common| common.appearance)
+    }
+
+    fn should_reduce_motion(&self) -> bool {
+        self.inner.with_common(|common| common.reduce_motion)
+    }
+
+    fn on_reduce_motion_change(&self, callback: Box<dyn FnMut()>) {
+        self.inner
+            .with_common(|common| common.callbacks.reduce_motion_change = Some(callback));
     }
 
     fn button_layout(&self) -> Option<WindowButtonLayout> {
