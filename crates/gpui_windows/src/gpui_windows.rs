@@ -38,5 +38,7 @@ pub(crate) use window::*;
 pub(crate) use wrapper::*;
 
 pub use platform::WindowsPlatform;
+#[cfg(feature = "test-support")]
+pub use platform::{test_reduce_motion_change_count, test_set_reduce_motion_override};
 
 pub(crate) use windows::Win32::Foundation::HWND;

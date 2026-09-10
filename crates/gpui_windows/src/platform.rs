@@ -89,6 +89,38 @@ struct PlatformCallbacks {
     reduce_motion_change: Cell<Option<Box<dyn FnMut()>>>,
 }
 
+/// `should_reduce_motion` reports this instead of the system setting when set:
+/// 0 follows the system, 1 means no preference, 2 means reduce.
+#[cfg(feature = "test-support")]
+static TEST_REDUCE_MOTION_OVERRIDE: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(0);
+
+/// Reduced-motion changes the platform has handed to its callback.
+#[cfg(feature = "test-support")]
+static REDUCE_MOTION_CHANGE_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Test seam: make `should_reduce_motion` report `reduce_motion` for this process
+/// instead of the system setting. `None` follows the system again.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn test_set_reduce_motion_override(reduce_motion: Option<bool>) {
+    let encoded = match reduce_motion {
+        None => 0,
+        Some(false) => 1,
+        Some(true) => 2,
+    };
+    TEST_REDUCE_MOTION_OVERRIDE.store(encoded, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Test seam: how many reduced-motion changes the platform has delivered, so a test
+/// can wait for one it triggered.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn test_reduce_motion_change_count() -> u64 {
+    REDUCE_MOTION_CHANGE_COUNT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 impl WindowsPlatformState {
     fn new(directx_devices: Option<DirectXDevices>) -> Self {
         let callbacks = PlatformCallbacks::default();
@@ -611,6 +643,13 @@ impl Platform for WindowsPlatform {
     }
 
     fn should_reduce_motion(&self) -> bool {
+        #[cfg(feature = "test-support")]
+        match TEST_REDUCE_MOTION_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst) {
+            1 => return false,
+            2 => return true,
+            _ => {}
+        }
+
         let mut client_area_animation = BOOL::default();
         let read = unsafe {
             SystemParametersInfoW(
@@ -1212,6 +1251,8 @@ impl WindowsPlatformInner {
             |callbacks| &callbacks.reduce_motion_change,
             |callback| callback(),
         );
+        #[cfg(feature = "test-support")]
+        REDUCE_MOTION_CHANGE_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Some(0)
     }
 
