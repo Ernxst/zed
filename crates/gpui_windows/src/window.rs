@@ -649,6 +649,26 @@ impl Drop for WindowsWindow {
     }
 }
 
+/// Whether the most recent `a11y_init` found its window already visible:
+/// 0 before any window has initialized accessibility, 1 hidden, 2 visible.
+#[cfg(feature = "test-support")]
+static A11Y_INIT_WINDOW_VISIBILITY: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(0);
+
+/// Test seam: whether the most recent accessibility adapter was created while its
+/// window was already visible. AccessKit requires the adapter before the first
+/// show, so a correct open reports `Some(false)`. `None` before any window has
+/// initialized accessibility.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn test_accessibility_initialized_while_visible() -> Option<bool> {
+    match A11Y_INIT_WINDOW_VISIBILITY.load(std::sync::atomic::Ordering::SeqCst) {
+        1 => Some(false),
+        2 => Some(true),
+        _ => None,
+    }
+}
+
 impl PlatformWindow for WindowsWindow {
     fn bounds(&self) -> Bounds<Pixels> {
         self.state.bounds()
@@ -1081,6 +1101,16 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn a11y_init(&self, callbacks: gpui::A11yCallbacks) {
+        #[cfg(feature = "test-support")]
+        A11Y_INIT_WINDOW_VISIBILITY.store(
+            if unsafe { IsWindowVisible(self.0.hwnd) }.as_bool() {
+                2
+            } else {
+                1
+            },
+            std::sync::atomic::Ordering::SeqCst,
+        );
+
         let action_handler = A11yActionHandler(callbacks.action);
         let is_focused = unsafe { GetForegroundWindow() } == self.0.hwnd;
 

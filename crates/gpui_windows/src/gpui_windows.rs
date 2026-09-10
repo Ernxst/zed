@@ -40,5 +40,7 @@ pub(crate) use wrapper::*;
 pub use platform::WindowsPlatform;
 #[cfg(feature = "test-support")]
 pub use platform::{test_reduce_motion_change_count, test_set_reduce_motion_override};
+#[cfg(feature = "test-support")]
+pub use window::test_accessibility_initialized_while_visible;
 
 pub(crate) use windows::Win32::Foundation::HWND;
