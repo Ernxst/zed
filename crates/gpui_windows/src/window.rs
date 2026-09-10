@@ -95,6 +95,10 @@ pub struct WindowsWindowState {
     pub(crate) draw_coordinator: Rc<DrawCoordinator>,
     fullscreen: Cell<Option<StyleAndBounds>>,
     initial_placement: Cell<Option<WindowOpenStatus>>,
+    /// Set when the window was opened with `show: true`, so that `finish_open` applies
+    /// `initial_placement` once accessibility setup has completed. Left unset for
+    /// `show: false` windows, whose placement instead stays pending for `activate`.
+    show_at_open: Cell<bool>,
     hwnd: HWND,
     pub(crate) a11y: RefCell<Option<A11yState>>,
 }
@@ -196,6 +200,7 @@ impl WindowsWindowState {
             display: Cell::new(display),
             fullscreen: Cell::new(fullscreen),
             initial_placement: Cell::new(initial_placement),
+            show_at_open: Cell::new(false),
             hwnd,
             invalidate_devices,
             draw_coordinator,
@@ -592,18 +597,20 @@ impl WindowsWindow {
                 DevicePixels(rect.bottom - rect.top),
             )));
         }
+        let mut placement = placement;
+        // The window must stay hidden until `finish_open`, which runs after
+        // accessibility setup has installed the AccessKit adapter. A `show: false`
+        // window keeps this placement pending for a later `activate` instead.
         if params.show {
-            let mut placement = placement;
             if !params.focus {
                 placement.showCmd = SW_SHOWNOACTIVATE.0 as u32;
             }
-            unsafe { SetWindowPlacement(hwnd, &placement)? };
-        } else {
-            this.state.initial_placement.set(Some(WindowOpenStatus {
-                placement,
-                state: WindowOpenState::Windowed,
-            }));
+            this.state.show_at_open.set(true);
         }
+        this.state.initial_placement.set(Some(WindowOpenStatus {
+            placement,
+            state: WindowOpenState::Windowed,
+        }));
 
         Ok(Self(this))
     }
@@ -937,6 +944,16 @@ impl PlatformWindow for WindowsWindow {
 
     fn minimize(&self) {
         unsafe { ShowWindowAsync(self.0.hwnd, SW_MINIMIZE).ok().log_err() };
+    }
+
+    /// Applies the window's initial placement, showing it for the first time. Deferred
+    /// until after accessibility setup, so the AccessKit adapter exists before the window
+    /// becomes visible to a screen reader.
+    fn finish_open(&mut self) -> anyhow::Result<()> {
+        if !self.state.show_at_open.take() {
+            return Ok(());
+        }
+        self.0.set_window_placement()
     }
 
     fn zoom(&self) {
