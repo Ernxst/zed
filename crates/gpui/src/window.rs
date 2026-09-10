@@ -2722,6 +2722,13 @@ impl Window {
         self.rendered_frame.scene.quads.clone()
     }
 
+    /// Surfaces in the most recently rendered frame. Used by tests to assert a
+    /// texture was composited without rasterizing.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn painted_surfaces(&self) -> Vec<crate::PaintSurface> {
+        self.rendered_frame.scene.surfaces.clone()
+    }
+
     /// Set the content size of the window.
     pub fn resize(&mut self, size: Size<Pixels>) {
         self.platform_window.resize(size);
@@ -3335,6 +3342,14 @@ impl Window {
         );
         self.needs_present.set(false);
         profiling::finish_frame!();
+    }
+
+    /// Presents the current scene again without drawing or invalidating views.
+    ///
+    /// This is intended for stable scenes whose external GPU resources changed,
+    /// such as an atlas image updated in place.
+    pub fn present_cached_frame(&mut self) {
+        self.present();
     }
 
     /// Presents the most recently drawn frame if it hasn't been presented yet.
@@ -4824,6 +4839,7 @@ impl Window {
             self.next_frame.scene.insert_primitive(PolychromeSprite {
                 order: 0,
                 clip_id,
+                nearest_neighbor: false.into(),
                 grayscale: false.into(),
                 bounds,
                 corner_radii: Default::default(),
@@ -4915,6 +4931,48 @@ impl Window {
         frame_index: usize,
         grayscale: bool,
     ) -> Result<()> {
+        self.paint_image_with_sampling(
+            bounds,
+            image_bounds,
+            corner_radii,
+            data,
+            frame_index,
+            grayscale,
+            false,
+        )
+    }
+
+    /// Paint an image with nearest-neighbor sampling.
+    pub fn paint_image_nearest(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        image_bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        data: Arc<RenderImage>,
+        frame_index: usize,
+        grayscale: bool,
+    ) -> Result<()> {
+        self.paint_image_with_sampling(
+            bounds,
+            image_bounds,
+            corner_radii,
+            data,
+            frame_index,
+            grayscale,
+            true,
+        )
+    }
+
+    fn paint_image_with_sampling(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        image_bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        data: Arc<RenderImage>,
+        frame_index: usize,
+        grayscale: bool,
+        nearest_neighbor: bool,
+    ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
         let visible_bounds = bounds.intersect(&image_bounds);
@@ -4993,6 +5051,7 @@ impl Window {
         self.next_frame.scene.insert_primitive(PolychromeSprite {
             order: 0,
             clip_id,
+            nearest_neighbor: nearest_neighbor.into(),
             grayscale: grayscale.into(),
             bounds: visible_bounds_snapped,
             corner_radii,
@@ -5019,6 +5078,64 @@ impl Window {
             clip_id,
             image_buffer,
         });
+    }
+
+    /// Paint a GPU texture into the scene for the next frame at the current z-index.
+    ///
+    /// `texture` must be `Arc<wgpu::Texture>` created on this window's
+    /// [`Self::gpu_context`] device. Ported from gpui-ce
+    /// ([#39](https://github.com/gpui-ce/gpui-ce/commit/6d043b22e477),
+    /// [#121](https://github.com/gpui-ce/gpui-ce/pull/121)).
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub fn paint_surface(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        texture: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+        texture_size: Size<DevicePixels>,
+    ) {
+        use crate::PaintSurface;
+
+        self.invalidator.debug_assert_paint();
+
+        let scale_factor = self.scale_factor();
+        let bounds = bounds.scale(scale_factor);
+        let content_mask = self.content_mask().scale(scale_factor);
+        self.next_frame.scene.insert_primitive(PaintSurface {
+            order: 0,
+            bounds,
+            content_mask,
+            texture,
+            texture_size,
+        });
+    }
+
+    /// Uploads new pixels for an image, retaining same-sized atlas tiles when possible.
+    ///
+    /// `data.id` must match the image already referenced by the current scene. Returns whether
+    /// every frame kept its existing atlas tile. When this returns `true`,
+    /// [`Self::present_cached_frame`] can present the updated pixels without redrawing.
+    pub fn update_image(&mut self, data: Arc<RenderImage>) -> Result<bool> {
+        let mut retained_all_tiles = data.frame_count() > 0;
+        for frame_index in 0..data.frame_count() {
+            let params = RenderImageParams {
+                image_id: data.id,
+                frame_index,
+            };
+            let key = params.into();
+            let previous_tile = self
+                .sprite_atlas
+                .get_or_insert_with(&key, &mut || Ok(None))?;
+            let bytes = data
+                .as_bytes(frame_index)
+                .ok_or_else(|| anyhow!("missing image frame {frame_index}"))?;
+            let updated_tile = self
+                .sprite_atlas
+                .update(&key, data.size(frame_index), bytes)?;
+            retained_all_tiles &= previous_tile.is_some() && previous_tile == updated_tile;
+        }
+        Ok(retained_all_tiles)
     }
 
     /// Removes an image from the sprite atlas.
@@ -6604,6 +6721,29 @@ impl Window {
         self.platform_window.gpu_specs()
     }
 
+    /// Returns the GPU context (device + queue) if available.
+    /// The returned `Box` contains `(Arc<wgpu::Device>, Arc<wgpu::Queue>)`.
+    ///
+    /// Ported from gpui-ce
+    /// ([#39](https://github.com/gpui-ce/gpui-ce/commit/6d043b22e477)).
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub fn gpu_context(&self) -> Option<Box<dyn std::any::Any>> {
+        self.platform_window.gpu_context()
+    }
+
+    /// Whether the GPU device backing this window has been lost (recovery
+    /// happens on a subsequent platform draw). `None` when the backend
+    /// cannot know. Embedders that captured the device from
+    /// [`Self::gpu_context`] should stop submitting while this is
+    /// `Some(true)` and re-acquire the device once it reads `Some(false)`.
+    ///
+    /// Ported from gpui-ce
+    /// ([#78](https://github.com/gpui-ce/gpui-ce/pull/78)).
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub fn gpu_device_lost(&self) -> Option<bool> {
+        self.platform_window.gpu_device_lost()
+    }
+
     /// Perform titlebar double-click action.
     /// This is macOS specific.
     pub fn titlebar_double_click(&self) {
@@ -6708,7 +6848,6 @@ impl Window {
             cx,
         );
     }
-
     /// Register a listener for an accessibility action on a specific node.
     /// The listener will be called when a screen reader requests the given
     /// action on the node identified by `node_id`.

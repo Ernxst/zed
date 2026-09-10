@@ -748,6 +748,9 @@ impl MetalRenderer {
 
         command_encoder.end_encoding();
 
+        // Dynamic atlas updates use CPU replacement, so retain the newest
+        // submission as a fence until the GPU has finished sampling it.
+        self.sprite_atlas.track_submission(command_buffer);
         Ok(command_buffer.to_owned())
     }
 

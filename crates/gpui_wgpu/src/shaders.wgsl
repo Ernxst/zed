@@ -1370,6 +1370,7 @@ fn fs_mono_sprite(input: MonoSpriteVarying) -> @location(0) vec4<f32> {
 struct PolychromeSprite {
     order: u32,
     clip_id: u32,
+    nearest_neighbor: u32,
     grayscale: u32,
     opacity: f32,
     bounds: Bounds,
@@ -1403,13 +1404,18 @@ fn vs_poly_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
 
 @fragment
 fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
-    let sample = textureSample(t_sprite, s_sprite, input.tile_position);
+    let sprite = load_poly_sprite(input.sprite_id);
+    var sample = textureSample(t_sprite, s_sprite, input.tile_position);
+    if (sprite.nearest_neighbor != 0u) {
+        let dimensions = textureDimensions(t_sprite);
+        let coordinates = min(vec2<i32>(input.tile_position * vec2<f32>(dimensions)), vec2<i32>(dimensions) - vec2<i32>(1));
+        sample = textureLoad(t_sprite, coordinates, 0);
+    }
     // Alpha clip after using the derivatives.
     if (any(input.clip_distances < vec4<f32>(0.0))) {
         return vec4<f32>(0.0);
     }
 
-    let sprite = load_poly_sprite(input.sprite_id);
     let distance = quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
 
     var color = sample;
@@ -1422,6 +1428,8 @@ fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
 }
 
 // --- surfaces --- //
+// RGBA texture composite. Ported from gpui-ce
+// https://github.com/gpui-ce/gpui-ce/commit/6d043b22e477
 
 struct SurfaceParams {
     bounds: Bounds,
@@ -1429,16 +1437,8 @@ struct SurfaceParams {
 }
 
 @group(1) @binding(0) var<uniform> surface_locals: SurfaceParams;
-@group(1) @binding(1) var t_y: texture_2d<f32>;
-@group(1) @binding(2) var t_cb_cr: texture_2d<f32>;
-@group(1) @binding(3) var s_surface: sampler;
-
-const ycbcr_to_RGB = mat4x4<f32>(
-    vec4<f32>( 1.0000f,  1.0000f,  1.0000f, 0.0),
-    vec4<f32>( 0.0000f, -0.3441f,  1.7720f, 0.0),
-    vec4<f32>( 1.4020f, -0.7141f,  0.0000f, 0.0),
-    vec4<f32>(-0.7010f,  0.5291f, -0.8860f, 1.0),
-);
+@group(1) @binding(1) var t_surface: texture_2d<f32>;
+@group(1) @binding(2) var s_surface: sampler;
 
 struct SurfaceVarying {
     @builtin(position) position: vec4<f32>,
@@ -1459,15 +1459,9 @@ fn vs_surface(@builtin(vertex_index) vertex_id: u32) -> SurfaceVarying {
 
 @fragment
 fn fs_surface(input: SurfaceVarying) -> @location(0) vec4<f32> {
-    // Alpha clip after using the derivatives.
     if (any(input.clip_distances < vec4<f32>(0.0))) {
         return vec4<f32>(0.0);
     }
 
-    let y_cb_cr = vec4<f32>(
-        textureSampleLevel(t_y, s_surface, input.texture_position, 0.0).r,
-        textureSampleLevel(t_cb_cr, s_surface, input.texture_position, 0.0).rg,
-        1.0);
-
-    return ycbcr_to_RGB * y_cb_cr;
+    return textureSampleLevel(t_surface, s_surface, input.texture_position, 0.0);
 }

@@ -289,8 +289,9 @@ fn load_mono_sprite(instance_id: u32) -> MonochromeSprite {
 }
 
 fn load_poly_sprite(instance_id: u32) -> PolychromeSprite {
-    var cursor = instance_cursor(instance_id * 20u);
+    var cursor = instance_cursor(instance_id * 21u);
     return PolychromeSprite(
+        read_word(&cursor),
         read_word(&cursor),
         read_word(&cursor),
         read_word(&cursor),

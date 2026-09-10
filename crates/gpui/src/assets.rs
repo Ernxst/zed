@@ -68,6 +68,12 @@ impl RenderImage {
         }
     }
 
+    /// Create a single-frame image from tightly packed BGRA pixels.
+    pub fn from_bgra(width: u32, height: u32, bytes: Vec<u8>) -> Option<Self> {
+        let buffer = image::RgbaImage::from_raw(width, height, bytes)?;
+        Some(Self::new(SmallVec::from_elem(Frame::new(buffer), 1)))
+    }
+
     /// Convert this image into a byte slice.
     pub fn as_bytes(&self, frame_index: usize) -> Option<&[u8]> {
         self.data
@@ -129,5 +135,14 @@ mod tests {
         assert_eq!(image.render_size(0), Size::default());
         assert_eq!(image.delay(0), Delay::from_numer_denom_ms(100, 1));
         let _ = format!("{image:?}");
+    }
+
+    #[test]
+    fn constructs_an_image_from_bgra_bytes() {
+        let bytes = vec![0x10, 0x20, 0x30, 0xff, 0xaa, 0xbb, 0xcc, 0xff];
+        let image = RenderImage::from_bgra(2, 1, bytes.clone()).expect("valid BGRA image");
+        assert_eq!(image.size(0), size(DevicePixels(2), DevicePixels(1)));
+        assert_eq!(image.as_bytes(0), Some(bytes.as_slice()));
+        assert!(RenderImage::from_bgra(2, 1, vec![0; 4]).is_none());
     }
 }
