@@ -214,6 +214,17 @@ pub enum GridAutoFlow {
     ColumnDense,
 }
 
+/// Which auto-repeat strategy a [`GridTemplateComponent::AutoRepeat`] uses.
+///
+/// [MDN](https://developer.mozilla.org/en-US/docs/Web/CSS/repeat#auto-fill)
+#[derive(Copy, Clone, PartialEq, Eq, Debug, JsonSchema, Serialize, Deserialize)]
+pub enum GridAutoRepeat {
+    /// `auto-fill`: keeps empty repetitions once the container has run out of space for more.
+    Fill,
+    /// `auto-fit`: like `auto-fill`, but collapses empty repetitions to zero size.
+    Fit,
+}
+
 /// One component of a CSS Grid `grid-template-*` track list.
 #[derive(Clone, PartialEq, Debug, JsonSchema, Serialize, Deserialize)]
 pub enum GridTemplateComponent {
@@ -223,6 +234,13 @@ pub enum GridTemplateComponent {
     Repeat {
         /// The number of repetitions.
         count: u16,
+        /// The tracks in each repetition.
+        tracks: Vec<GridTrack>,
+    },
+    /// A sequence of tracks repeated as many times as the container permits.
+    AutoRepeat {
+        /// Whether empty repetitions collapse to zero size (`auto-fit`) or are kept (`auto-fill`).
+        kind: GridAutoRepeat,
         /// The tracks in each repetition.
         tracks: Vec<GridTrack>,
     },

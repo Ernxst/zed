@@ -1,5 +1,5 @@
 use crate::{
-    AbsoluteLength, App, Bounds, CalcLength, DefiniteLength, Edges, GridTemplate,
+    AbsoluteLength, App, Bounds, CalcLength, DefiniteLength, Edges, GridAutoRepeat, GridTemplate,
     GridTemplateComponent, GridTrack, GridTrackMax, GridTrackMin, Length, Pixels, Point, Size,
     Style, Window, size,
     util::{
@@ -952,6 +952,16 @@ impl ToTaffy<taffy::style::Style> for Style {
                     ),
                     GridTemplateComponent::Repeat { count, tracks } => repeat(
                         *count,
+                        tracks
+                            .iter()
+                            .map(|track| to_track(track, rem_size, scale_factor))
+                            .collect(),
+                    ),
+                    GridTemplateComponent::AutoRepeat { kind, tracks } => repeat(
+                        match kind {
+                            GridAutoRepeat::Fill => taffy::style::RepetitionCount::AutoFill,
+                            GridAutoRepeat::Fit => taffy::style::RepetitionCount::AutoFit,
+                        },
                         tracks
                             .iter()
                             .map(|track| to_track(track, rem_size, scale_factor))
@@ -2017,6 +2027,51 @@ mod tests {
         assert_eq!(
             scaled_taffy_style.grid_template_columns,
             vec![taffy::GridTemplateComponent::Single(length(96.))]
+        );
+    }
+
+    #[test]
+    fn grid_templates_lower_auto_repeat() {
+        use taffy::style_helpers::{length, minmax, repeat};
+        use taffy::style::RepetitionCount;
+
+        let style = Style {
+            grid_cols: Some(GridTemplate {
+                tracks: vec![GridTemplateComponent::AutoRepeat {
+                    kind: GridAutoRepeat::Fill,
+                    tracks: vec![GridTrack::MinMax {
+                        min: GridTrackMin::Px(px(180.)),
+                        max: GridTrackMax::Fr(1.),
+                    }],
+                }],
+            }),
+            grid_rows: Some(GridTemplate {
+                tracks: vec![GridTemplateComponent::AutoRepeat {
+                    kind: GridAutoRepeat::Fit,
+                    tracks: vec![GridTrack::MinMax {
+                        min: GridTrackMin::Px(px(100.)),
+                        max: GridTrackMax::Fr(1.),
+                    }],
+                }],
+            }),
+            ..Default::default()
+        };
+
+        let taffy_style: taffy::style::Style = style.to_taffy(px(16.), 1.);
+
+        assert_eq!(
+            taffy_style.grid_template_columns,
+            vec![repeat(
+                RepetitionCount::AutoFill,
+                vec![minmax(length(180.), taffy::style_helpers::fr(1.))],
+            )]
+        );
+        assert_eq!(
+            taffy_style.grid_template_rows,
+            vec![repeat(
+                RepetitionCount::AutoFit,
+                vec![minmax(length(100.), taffy::style_helpers::fr(1.))],
+            )]
         );
     }
 
