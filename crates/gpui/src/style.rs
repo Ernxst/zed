@@ -851,6 +851,64 @@ impl Style {
 
         let border_widths = self.border_widths.to_pixels(rem_size);
 
+        // The CSS default `background-origin` is the padding box: the border
+        // box inset by the border widths. Round each logical edge half up
+        // (matching Chromium's layout-pixel snapping), then derive
+        // nonnegative dimensions from the rounded edges. This snapped box is
+        // used only as the background gradient's positioning area below.
+        let padding_left = px(round_half_up((bounds.origin.x + border_widths.left).0));
+        let padding_top = px(round_half_up((bounds.origin.y + border_widths.top).0));
+        let padding_right = px(round_half_up(
+            (bounds.origin.x + bounds.size.width - border_widths.right).0,
+        ));
+        let padding_bottom = px(round_half_up(
+            (bounds.origin.y + bounds.size.height - border_widths.bottom).0,
+        ));
+        let padding_area = Bounds {
+            origin: point(padding_left, padding_top),
+            size: size(
+                (padding_right - padding_left).max(Pixels::ZERO),
+                (padding_bottom - padding_top).max(Pixels::ZERO),
+            ),
+        };
+        // Inset shadows clip to the padding box in the element's own
+        // (unsnapped) coordinate space, not the half-up-snapped box above:
+        // that box is derived from absolute logical position, so snapping it
+        // independently of a fractionally offset element (e.g. mid-scroll,
+        // see `div.rs`'s scroll-offset handling) would shift the shadow by up
+        // to half a logical pixel against its own background and border,
+        // which are painted at the unsnapped `bounds`. With zero border
+        // widths this is exactly `bounds`.
+        let shadow_padding_area = Bounds {
+            origin: point(
+                bounds.origin.x + border_widths.left,
+                bounds.origin.y + border_widths.top,
+            ),
+            size: size(
+                (bounds.size.width - border_widths.left - border_widths.right)
+                    .max(Pixels::ZERO),
+                (bounds.size.height - border_widths.top - border_widths.bottom)
+                    .max(Pixels::ZERO),
+            ),
+        };
+        // The padding box's corner radius: the outer radius minus the larger
+        // of its two adjacent border widths, floored at zero. GPUI's corner
+        // radii are scalar, so unequal adjacent widths can only be
+        // approximated with a circular arc — the same approximation
+        // `overflow_mask` uses for the content-clip radius. With zero border
+        // widths this is exactly `corner_radii`.
+        let padding_corner_radii = Corners {
+            top_left: (corner_radii.top_left - border_widths.left.max(border_widths.top))
+                .max(Pixels::ZERO),
+            top_right: (corner_radii.top_right - border_widths.right.max(border_widths.top))
+                .max(Pixels::ZERO),
+            bottom_right: (corner_radii.bottom_right
+                - border_widths.right.max(border_widths.bottom))
+            .max(Pixels::ZERO),
+            bottom_left: (corner_radii.bottom_left - border_widths.left.max(border_widths.bottom))
+                .max(Pixels::ZERO),
+        };
+
         let background_color = self.background.as_ref().and_then(Fill::color);
         if background_color.is_some_and(|color| !color.is_transparent()) {
             let mut border_color = match background_color {
@@ -870,26 +928,6 @@ impl Style {
             };
             border_color.a = 0.;
 
-            // The CSS default `background-origin` is the padding box: the border
-            // box inset by the border widths. Round each logical edge half up
-            // (matching Chromium's layout-pixel snapping), then derive
-            // nonnegative dimensions from the rounded edges.
-            let padding_left = px(round_half_up((bounds.origin.x + border_widths.left).0));
-            let padding_top = px(round_half_up((bounds.origin.y + border_widths.top).0));
-            let padding_right = px(round_half_up(
-                (bounds.origin.x + bounds.size.width - border_widths.right).0,
-            ));
-            let padding_bottom = px(round_half_up(
-                (bounds.origin.y + bounds.size.height - border_widths.bottom).0,
-            ));
-            let padding_area = Bounds {
-                origin: point(padding_left, padding_top),
-                size: size(
-                    (padding_right - padding_left).max(Pixels::ZERO),
-                    (padding_bottom - padding_top).max(Pixels::ZERO),
-                ),
-            };
-
             window.paint_quad(quad(
                 bounds,
                 corner_radii,
@@ -902,7 +940,7 @@ impl Style {
             ));
         }
 
-        window.paint_inset_shadows(bounds, corner_radii, &self.box_shadow);
+        window.paint_inset_shadows(shadow_padding_area, padding_corner_radii, &self.box_shadow);
 
         continuation(window, cx);
 
