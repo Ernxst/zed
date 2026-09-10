@@ -1,6 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
-    ffi::{OsStr, OsString},
+    ffi::{OsStr, OsString, c_void},
     os::windows::ffi::{OsStrExt as _, OsStringExt as _},
     path::{Path, PathBuf},
     rc::{Rc, Weak},
@@ -86,6 +86,7 @@ struct PlatformCallbacks {
     validate_app_menu_command: Cell<Option<Box<dyn FnMut(&dyn Action) -> bool>>>,
     keyboard_layout_change: Cell<Option<Box<dyn FnMut()>>>,
     system_wake: Cell<Option<Box<dyn FnMut()>>>,
+    reduce_motion_change: Cell<Option<Box<dyn FnMut()>>>,
 }
 
 impl WindowsPlatformState {
@@ -609,6 +610,29 @@ impl Platform for WindowsPlatform {
         system_appearance().log_err().unwrap_or_default()
     }
 
+    fn should_reduce_motion(&self) -> bool {
+        let mut client_area_animation = BOOL::default();
+        let read = unsafe {
+            SystemParametersInfoW(
+                SPI_GETCLIENTAREAANIMATION,
+                0,
+                Some((&mut client_area_animation) as *mut BOOL as *mut c_void),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS::default(),
+            )
+        }
+        .log_err();
+
+        read.is_some() && !client_area_animation.as_bool()
+    }
+
+    fn on_reduce_motion_change(&self, callback: Box<dyn FnMut()>) {
+        self.inner
+            .state
+            .callbacks
+            .reduce_motion_change
+            .set(Some(callback));
+    }
+
     fn open_url(&self, url: &str) {
         if url.is_empty() {
             return;
@@ -1024,6 +1048,7 @@ impl WindowsPlatformInner {
             | WM_GPUI_DOCK_MENU_ACTION
             | WM_GPUI_KEYBOARD_LAYOUT_CHANGED
             | WM_GPUI_GPU_DEVICE_LOST
+            | WM_GPUI_REDUCE_MOTION_CHANGED
             | WM_GPUI_END_SESSION => self.handle_gpui_events(msg, wparam, lparam),
             WM_POWERBROADCAST => self.handle_power_broadcast(wparam),
             _ => None,
@@ -1048,6 +1073,7 @@ impl WindowsPlatformInner {
             WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD => self.run_foreground_task(),
             WM_GPUI_DOCK_MENU_ACTION => self.handle_dock_action_event(lparam.0 as _),
             WM_GPUI_KEYBOARD_LAYOUT_CHANGED => self.handle_keyboard_layout_change(),
+            WM_GPUI_REDUCE_MOTION_CHANGED => self.handle_reduce_motion_change(),
             WM_GPUI_GPU_DEVICE_LOST => self.handle_device_lost(lparam),
             WM_GPUI_END_SESSION => self.handle_end_session(),
             _ => unreachable!(),
@@ -1176,6 +1202,14 @@ impl WindowsPlatformInner {
     fn handle_keyboard_layout_change(&self) -> Option<isize> {
         self.with_callback(
             |callbacks| &callbacks.keyboard_layout_change,
+            |callback| callback(),
+        );
+        Some(0)
+    }
+
+    fn handle_reduce_motion_change(&self) -> Option<isize> {
+        self.with_callback(
+            |callbacks| &callbacks.reduce_motion_change,
             |callback| callback(),
         );
         Some(0)

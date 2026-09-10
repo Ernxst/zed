@@ -29,6 +29,7 @@ pub(crate) const WM_GPUI_KEYBOARD_LAYOUT_CHANGED: u32 = WM_USER + 6;
 pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
 pub(crate) const WM_GPUI_KEYDOWN: u32 = WM_USER + 8;
 pub(crate) const WM_GPUI_END_SESSION: u32 = WM_USER + 9;
+pub(crate) const WM_GPUI_REDUCE_MOTION_CHANGED: u32 = WM_USER + 10;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
 
@@ -1249,10 +1250,27 @@ impl WindowsWindowInner {
             // system settings may emit a window message which wants to take the refcell self.state, so drop it
 
             self.system_settings().update(wparam.0);
+
+            if wparam.0 == SPI_SETCLIENTAREAANIMATION.0 as usize {
+                self.handle_reduce_motion_changed();
+            }
         } else {
             self.handle_system_theme_changed(handle, lparam)?;
         };
 
+        Some(0)
+    }
+
+    fn handle_reduce_motion_changed(&self) -> Option<isize> {
+        unsafe {
+            PostMessageW(
+                Some(self.platform_window_handle),
+                WM_GPUI_REDUCE_MOTION_CHANGED,
+                WPARAM(self.validation_number),
+                LPARAM(0),
+            )
+            .log_err();
+        }
         Some(0)
     }
 
