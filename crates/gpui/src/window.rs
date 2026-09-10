@@ -6,25 +6,24 @@ use crate::Inspector;
 use crate::profiler;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AtlasTile, AvailableSpace, Axis, Background, BorderStyle, Bounds, BoxShadow,
-    Capslock, ClipNode, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
-    DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
-    EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
-    Hsla, InputHandler, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent, KeyListener,
-    Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
-    MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, OngoingScroll, Path,
-    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
-    Point, PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
-    RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
-    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, ScrollDelta, ScrollWheelEvent,
-    Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite, SubscriberSet,
-    Subscription, SystemWindowTab,
+    AsyncWindowContext, AtlasTile, AvailableSpace, Axis, Background, BorderStyle, Bounds,
+    BoxShadow, Capslock, ClipNode, Context, Corners, CursorHideMode, CursorStyle, Decorations,
+    DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect,
+    Entity, EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId,
+    GpuSpecs, Hsla, InputHandler, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
+    KeyListener, Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers,
+    ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent,
+    OngoingScroll, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
+    PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, Priority, PromptButton,
+    PromptLevel, Quad, Render, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams,
+    Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y,
+    ScaledPixels, Scene, ScrollDelta, ScrollWheelEvent, Shadow, SharedString, Size,
+    StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab,
     SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle,
     TextStyleRefinement, ThermalState, TransformationMatrix, Underline, UnderlineStyle,
     WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations,
     WindowInsets, WindowMinSize, WindowOptions, WindowParams, WindowTextSystem, point, prelude::*,
-    px, rems, size,
-    transparent_black,
+    px, rems, size, transparent_black,
 };
 
 use anyhow::{Context as _, Result, anyhow};
@@ -124,6 +123,9 @@ struct WindowInvalidatorInner {
     pub dirty: bool,
     pub draw_phase: DrawPhase,
     pub dirty_views: FxHashSet<EntityId>,
+    pub scroll_views: FxHashSet<EntityId>,
+    pub saw_scroll_invalidation: bool,
+    pub saw_non_scroll_invalidation: bool,
     pub update_count: usize,
     #[cfg(feature = "profiler")]
     pub frame_dirty: FrameDirtyAccumulator,
@@ -156,6 +158,9 @@ impl WindowInvalidator {
                 dirty: true,
                 draw_phase: DrawPhase::None,
                 dirty_views: FxHashSet::default(),
+                scroll_views: FxHashSet::default(),
+                saw_scroll_invalidation: false,
+                saw_non_scroll_invalidation: false,
                 update_count: 0,
                 #[cfg(feature = "profiler")]
                 frame_dirty: FrameDirtyAccumulator::default(),
@@ -167,6 +172,11 @@ impl WindowInvalidator {
     pub fn invalidate_view(&self, entity: EntityId, cx: &mut App) -> bool {
         let mut inner = self.inner.borrow_mut();
         inner.update_count += 1;
+        if inner.scroll_views.remove(&entity) {
+            inner.saw_scroll_invalidation = true;
+        } else {
+            inner.saw_non_scroll_invalidation = true;
+        }
         inner.dirty_views.insert(entity);
         if inner.draw_phase == DrawPhase::None {
             #[cfg(feature = "profiler")]
@@ -201,6 +211,7 @@ impl WindowInvalidator {
         inner.dirty = dirty;
         if dirty {
             inner.update_count += 1;
+            inner.saw_non_scroll_invalidation = true;
         }
         #[cfg(feature = "profiler")]
         let dirty_at = dirty.then(|| Self::record_frame_dirty(&mut inner));
@@ -259,6 +270,23 @@ impl WindowInvalidator {
 
     pub fn take_views(&self) -> FxHashSet<EntityId> {
         mem::take(&mut self.inner.borrow_mut().dirty_views)
+    }
+
+    pub fn mark_scroll_view(&self, entity: EntityId) {
+        self.inner.borrow_mut().scroll_views.insert(entity);
+    }
+
+    pub fn take_scroll_invalidation(&self) -> Option<bool> {
+        let mut inner = self.inner.borrow_mut();
+        let invalidation = if !inner.saw_scroll_invalidation && !inner.saw_non_scroll_invalidation {
+            None
+        } else {
+            Some(inner.saw_scroll_invalidation && !inner.saw_non_scroll_invalidation)
+        };
+        inner.scroll_views.clear();
+        inner.saw_scroll_invalidation = false;
+        inner.saw_non_scroll_invalidation = false;
+        invalidation
     }
 
     pub fn replace_views(&self, views: FxHashSet<EntityId>) {
@@ -750,9 +778,7 @@ struct ScrollDispatchState {
 impl ScrollDispatchState {
     fn consume(&mut self, consumed: Point<Pixels>, line_height: Pixels) {
         fn residual(remaining: Pixels, consumed: Pixels) -> Pixels {
-            if remaining.is_zero()
-                || consumed.is_zero()
-                || remaining.signum() != consumed.signum()
+            if remaining.is_zero() || consumed.is_zero() || remaining.signum() != consumed.signum()
             {
                 remaining
             } else if consumed.abs() >= remaining.abs() {
@@ -874,7 +900,12 @@ impl HitboxId {
     /// `is_hovered` should be used. See the documentation of `Hitbox::is_hovered` for details about
     /// this distinction.
     pub fn should_handle_scroll(self, window: &Window) -> bool {
-        window.mouse_hit_test.ids.contains(&self)
+        window
+            .scroll_event_hit_test
+            .as_ref()
+            .unwrap_or(&window.mouse_hit_test)
+            .ids
+            .contains(&self)
     }
 
     fn next(mut self) -> HitboxId {
@@ -1262,8 +1293,11 @@ pub struct Window {
     default_prevented: bool,
     mouse_position: Point<Pixels>,
     mouse_hit_test: HitTest,
+    scroll_event_hit_test: Option<HitTest>,
     scroll_dispatch_state: Option<ScrollDispatchState>,
     ongoing_scroll: OngoingScroll,
+    scroll_hover_reconciliation_scheduled: bool,
+    scroll_hover_suppressed: bool,
     modifiers: Modifiers,
     capslock: Capslock,
     scale_factor: f32,
@@ -1953,8 +1987,11 @@ impl Window {
             default_prevented: true,
             mouse_position,
             mouse_hit_test: HitTest::default(),
+            scroll_event_hit_test: None,
             scroll_dispatch_state: None,
             ongoing_scroll: OngoingScroll::default(),
+            scroll_hover_reconciliation_scheduled: false,
+            scroll_hover_suppressed: false,
             modifiers,
             capslock,
             scale_factor,
@@ -2255,6 +2292,10 @@ impl Window {
             self.refreshing = true;
             self.invalidator.set_dirty(true);
         }
+    }
+
+    pub(crate) fn mark_scroll_invalidation(&self, entity: EntityId) {
+        self.invalidator.mark_scroll_view(entity);
     }
 
     /// Reports whether the platform frame loop would redraw this window.
@@ -2606,6 +2647,22 @@ impl Window {
         // Next-frame callbacks create frame demand without dirtying the
         // window, so the platform's frame source must be woken explicitly.
         self.invalidator.wake_platform();
+    }
+
+    fn schedule_scroll_hover_reconciliation(&mut self) {
+        if self.scroll_hover_reconciliation_scheduled {
+            return;
+        }
+
+        self.scroll_hover_reconciliation_scheduled = true;
+        self.on_next_frame(|window, _cx| {
+            window.scroll_hover_reconciliation_scheduled = false;
+            if window.ongoing_scroll.is_active() {
+                window.schedule_scroll_hover_reconciliation();
+            } else {
+                window.refresh();
+            }
+        });
     }
 
     /// Schedule a frame to be drawn on the next animation frame.
@@ -3173,6 +3230,12 @@ impl Window {
         let arena_scope = ElementArenaScope::enter(&cx.element_arena);
 
         self.invalidate_entities();
+        match self.invalidator.take_scroll_invalidation() {
+            Some(true) => self.scroll_hover_suppressed = self.ongoing_scroll.is_active(),
+            Some(false) => self.scroll_hover_suppressed = false,
+            None if !self.ongoing_scroll.is_active() => self.scroll_hover_suppressed = false,
+            None => {}
+        }
         cx.entities.clear_accessed();
         debug_assert!(self.rendered_entity_stack.is_empty());
         self.invalidator.set_dirty(false);
@@ -3410,6 +3473,46 @@ impl Window {
         self.debug_frame_overlay.stats()
     }
 
+    fn hit_test_preserving_scroll_hover(&self) -> HitTest {
+        let mut hit_test = HitTest::default();
+        let old_hit_test = &self.mouse_hit_test;
+
+        for (index, old_id) in old_hit_test.ids.iter().enumerate() {
+            let Some((old_index, old_hitbox)) = self
+                .rendered_frame
+                .hitboxes
+                .iter()
+                .enumerate()
+                .find(|(_, hitbox)| hitbox.id == *old_id)
+            else {
+                continue;
+            };
+
+            let current_hitbox = match old_hitbox.identity.as_ref() {
+                Some(identity) => self
+                    .next_frame
+                    .hitboxes
+                    .iter()
+                    .find(|hitbox| hitbox.identity.as_ref() == Some(identity)),
+                None => self.next_frame.hitboxes.get(old_index),
+            };
+
+            let Some(current_hitbox) = current_hitbox else {
+                continue;
+            };
+            if current_hitbox.behavior != old_hitbox.behavior {
+                continue;
+            }
+
+            hit_test.ids.push(current_hitbox.id);
+            if index < old_hit_test.hover_hitbox_count {
+                hit_test.hover_hitbox_count += 1;
+            }
+        }
+
+        hit_test
+    }
+
     fn draw_roots(&mut self, cx: &mut App) {
         self.invalidator.set_phase(DrawPhase::Prepaint);
         self.tooltip_bounds.take();
@@ -3477,7 +3580,14 @@ impl Window {
             tooltip_element = self.prepaint_tooltip(cx);
         }
 
-        self.mouse_hit_test = self.next_frame.hit_test(self.mouse_position);
+        // A scroll changes the content under a stationary pointer without changing
+        // the pointer's hit target. Keep the previous hit test until the gesture
+        // ends so hover styles and listeners do not churn on every scroll frame.
+        self.mouse_hit_test = if self.scroll_hover_suppressed {
+            self.hit_test_preserving_scroll_hover()
+        } else {
+            self.next_frame.hit_test(self.mouse_position)
+        };
 
         // Now actually paint the elements.
         self.invalidator.set_phase(DrawPhase::Paint);
@@ -5744,10 +5854,35 @@ impl Window {
             PlatformInput::KeyDown(_) | PlatformInput::KeyUp(_) => event,
         };
 
+        if let PlatformInput::ScrollWheel(scroll_wheel) = &event {
+            self.scroll_event_hit_test = Some(self.rendered_frame.hit_test(scroll_wheel.position));
+        }
+
         if let Some(any_mouse_event) = event.mouse_event() {
             self.dispatch_mouse_event(any_mouse_event, cx);
         } else if let Some(any_key_event) = event.keyboard_event() {
             self.dispatch_key_event(any_key_event, cx);
+        }
+
+        self.scroll_event_hit_test = None;
+
+        if let PlatformInput::ScrollWheel(scroll_wheel) = &event {
+            self.ongoing_scroll
+                .observe(scroll_wheel.touch_phase, scroll_wheel.momentum_phase);
+            if self.ongoing_scroll.is_active() {
+                self.schedule_scroll_hover_reconciliation();
+            } else if !self.scroll_hover_reconciliation_scheduled {
+                // Ended/cancelled phases can carry no delta, so there may be no
+                // other invalidation to trigger the final hit-test reconciliation.
+                self.refresh();
+            }
+        }
+
+        if matches!(event, PlatformInput::MouseExited(_)) {
+            // Leaving the window is authoritative even when a scroll gesture was
+            // active. Do not retain the scroll-era hit target for the next frame.
+            self.ongoing_scroll = OngoingScroll::default();
+            self.mouse_hit_test = HitTest::default();
         }
 
         // Must run after the move is dispatched: the platform owns the gesture afterwards, so this
@@ -5798,10 +5933,15 @@ impl Window {
     }
 
     fn dispatch_mouse_event(&mut self, event: &dyn Any, cx: &mut App) {
-        let hit_test = self.rendered_frame.hit_test(self.mouse_position());
-        if hit_test != self.mouse_hit_test {
-            self.mouse_hit_test = hit_test;
-            self.reset_cursor_style(cx);
+        // A wheel event moves content, not the pointer. Retain the previous hit
+        // target; a MouseMove remains the authoritative path for re-hit-testing
+        // at the new pointer position.
+        if !event.is::<ScrollWheelEvent>() {
+            let hit_test = self.rendered_frame.hit_test(self.mouse_position());
+            if hit_test != self.mouse_hit_test {
+                self.mouse_hit_test = hit_test;
+                self.reset_cursor_style(cx);
+            }
         }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
@@ -5911,6 +6051,11 @@ impl Window {
     pub(crate) fn scroll_axis_locked(&self) -> bool {
         self.scroll_dispatch_state
             .is_some_and(|state| state.axis_locked)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scroll_hover_active_for_test(&self) -> bool {
+        self.ongoing_scroll.is_active()
     }
 
     /// Reports the pixel delta actually applied by a scroll handler during the

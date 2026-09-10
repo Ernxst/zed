@@ -26,9 +26,74 @@ pub struct OngoingScroll {
     touch_phase_active: bool,
     momentum_active: bool,
     momentum_axis: Option<Axis>,
+    moved_only_active: bool,
 }
 
 impl OngoingScroll {
+    fn update_activity_at(
+        &mut self,
+        touch_phase: TouchPhase,
+        momentum_phase: Option<TouchPhase>,
+        now: Instant,
+    ) {
+        if touch_phase == TouchPhase::Cancelled
+            || matches!(
+                momentum_phase,
+                Some(TouchPhase::Ended | TouchPhase::Cancelled)
+            )
+        {
+            self.touch_phase_active = false;
+            self.momentum_active = false;
+            self.moved_only_active = false;
+            self.last_event = None;
+            return;
+        }
+
+        if touch_phase == TouchPhase::Ended && momentum_phase.is_none() {
+            self.touch_phase_active = false;
+            self.momentum_active = false;
+            self.moved_only_active = false;
+            self.last_event = None;
+            return;
+        }
+
+        match momentum_phase {
+            Some(TouchPhase::Started | TouchPhase::Moved) => {
+                self.touch_phase_active = false;
+                self.momentum_active = true;
+            }
+            None if touch_phase == TouchPhase::Started => {
+                self.touch_phase_active = true;
+                self.momentum_active = false;
+            }
+            None if touch_phase == TouchPhase::Moved => {
+                self.momentum_active = false;
+            }
+            Some(TouchPhase::Ended | TouchPhase::Cancelled) | None => {}
+        }
+
+        self.last_event = Some(now);
+        self.moved_only_active = momentum_phase.is_none()
+            && touch_phase == TouchPhase::Moved
+            && !self.touch_phase_active;
+    }
+
+    /// Records scroll gesture activity without changing the axis lock.
+    pub(crate) fn observe(&mut self, touch_phase: TouchPhase, momentum_phase: Option<TouchPhase>) {
+        self.update_activity_at(touch_phase, momentum_phase, Instant::now());
+    }
+
+    /// Whether this scroll gesture still suppresses hover reconciliation.
+    pub(crate) fn is_active(&self) -> bool {
+        self.is_active_at(Instant::now())
+    }
+
+    fn is_active_at(&self, now: Instant) -> bool {
+        self.last_event.is_some()
+            && (!self.moved_only_active
+                || now.duration_since(self.last_event.unwrap()) < SCROLL_EVENT_SEPARATION)
+    }
+
     /// Filters the given delta to the dominant axis of the current scroll gesture.
     ///
     /// Gestures are delimited by their touch phase when available, with a timeout
@@ -63,6 +128,9 @@ impl OngoingScroll {
         const SWITCH_PERCENT: f32 = 1.9;
         const SWITCH_LOWER_BOUND: Pixels = px(6.);
 
+        let previous_last_event = self.last_event;
+        self.update_activity_at(touch_phase, momentum_phase, now);
+
         if touch_phase == TouchPhase::Cancelled
             || matches!(
                 momentum_phase,
@@ -77,7 +145,6 @@ impl OngoingScroll {
             self.touch_phase_active = false;
             self.momentum_active = false;
             self.momentum_axis = self.axis.take();
-            self.last_event = Some(now);
             return;
         }
 
@@ -111,7 +178,7 @@ impl OngoingScroll {
             self.momentum_active = false;
             self.momentum_axis = None;
             self.axis.is_none()
-                || self.last_event.is_none_or(|last_event| {
+                || previous_last_event.is_none_or(|last_event| {
                     now.duration_since(last_event) >= SCROLL_EVENT_SEPARATION
                 })
         };
@@ -419,6 +486,44 @@ mod tests {
         ongoing_scroll.filter_at(&mut horizontal_delta, TouchPhase::Moved, now);
         assert_eq!(ongoing_scroll.axis, Some(Axis::Horizontal));
         assert_eq!(horizontal_delta, point(px(10.), px(0.)));
+    }
+
+    #[test]
+    fn ongoing_scroll_activity_tracks_phases_and_moved_only_timeout() {
+        let now = Instant::now();
+        let mut ongoing_scroll = OngoingScroll::default();
+
+        let mut delta = point(px(10.), px(2.));
+        ongoing_scroll.filter_at(&mut delta, TouchPhase::Started, now);
+        assert!(ongoing_scroll.is_active_at(now + Duration::from_secs(1)));
+
+        ongoing_scroll.filter_at(
+            &mut Point::default(),
+            TouchPhase::Ended,
+            now + Duration::from_millis(1),
+        );
+        assert!(!ongoing_scroll.is_active_at(now + Duration::from_millis(2)));
+
+        ongoing_scroll.filter_at(
+            &mut Point::default(),
+            TouchPhase::Moved,
+            now + Duration::from_millis(3),
+        );
+        assert!(ongoing_scroll.is_active_at(now + Duration::from_millis(4)));
+        assert!(
+            !ongoing_scroll.is_active_at(now + Duration::from_millis(3) + SCROLL_EVENT_SEPARATION)
+        );
+
+        let mut next_delta = point(px(2.), px(10.));
+        ongoing_scroll.filter_at(
+            &mut next_delta,
+            TouchPhase::Moved,
+            now + Duration::from_millis(3) + SCROLL_EVENT_SEPARATION,
+        );
+        assert!(
+            ongoing_scroll.is_active_at(now + Duration::from_millis(3) + SCROLL_EVENT_SEPARATION)
+        );
+        assert_eq!(ongoing_scroll.axis, Some(Axis::Vertical));
     }
 
     #[test]

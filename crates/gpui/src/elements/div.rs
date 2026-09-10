@@ -2456,12 +2456,7 @@ impl Interactivity {
         }
     }
 
-    fn scroll_max(
-        &self,
-        bounds: Bounds<Pixels>,
-        style: &Style,
-        rem_size: Pixels,
-    ) -> Point<Pixels> {
+    fn scroll_max(&self, bounds: Bounds<Pixels>, style: &Style, rem_size: Pixels) -> Point<Pixels> {
         fn round_to_two_decimals(pixels: Pixels) -> Pixels {
             const ROUNDING_FACTOR: f32 = 100.0;
             (pixels * ROUNDING_FACTOR).round() / ROUNDING_FACTOR
@@ -3423,6 +3418,7 @@ impl Interactivity {
                             consumed.y += applied.y;
                         }
                         window.consume_scroll_delta(consumed, line_height);
+                        window.mark_scroll_invalidation(current_view);
                         cx.notify(current_view);
                     }
                 }
@@ -4506,7 +4502,7 @@ mod tests {
     use super::*;
     use crate::{
         AnyWindowHandle, AppContext as _, Context, InputEvent, Keystroke, Modifiers,
-        MouseMoveEvent, TestAppContext, canvas, svg, util::FluentBuilder as _,
+        MouseMoveEvent, TestAppContext, VisualTestContext, canvas, svg, util::FluentBuilder as _,
     };
     use std::{
         cell::{Cell, RefCell},
@@ -5310,6 +5306,34 @@ mod tests {
     }
 
     #[gpui::test]
+    fn nested_scroll_uses_current_wheel_position_for_routing(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let parent = ScrollHandle::new();
+        let inner = ScrollHandle::new();
+
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, cx| {
+            cx.new(|_| NestedScrollTestView {
+                parent: parent.clone(),
+                inner: inner.clone(),
+                inner_content_height: px(200.),
+            })
+            .into_any_element()
+        });
+
+        // The previous pointer location is inside the inner scroller. The wheel
+        // position is in the parent's lower content, so it must route directly
+        // to the parent without a preceding MouseMove event.
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(50.), px(150.)),
+            delta: crate::ScrollDelta::Pixels(point(px(0.), px(-60.))),
+            ..Default::default()
+        });
+
+        assert_eq!(inner.offset().y, px(0.));
+        assert_eq!(parent.offset().y, px(-60.));
+    }
+
+    #[gpui::test]
     fn nested_scroll_switches_axis_on_strong_direction_change(cx: &mut TestAppContext) {
         let cx = cx.add_empty_window();
         let parent = ScrollHandle::new();
@@ -5407,6 +5431,149 @@ mod tests {
 
         assert_eq!(inner.offset().x, px(-47.));
         assert_eq!(parent.offset().y, px(-20.));
+    }
+
+    struct HoverScrollTestView {
+        scroll: ScrollHandle,
+        layout_shift: bool,
+        transitions: Rc<RefCell<Vec<(usize, bool)>>>,
+    }
+
+    impl Render for HoverScrollTestView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("hover-scroll")
+                .w(px(100.))
+                .h(px(80.))
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll)
+                .children((0..6).map(|row| {
+                    let transitions = self.transitions.clone();
+                    div()
+                        .id(format!("hover-row-{row}"))
+                        .flex_none()
+                        .w_full()
+                        .h(if self.layout_shift { px(20.) } else { px(40.) })
+                        .on_hover(move |hovered, _, _| {
+                            transitions.borrow_mut().push((row, *hovered));
+                        })
+                }))
+        }
+    }
+
+    #[gpui::test]
+    fn hover_reconciliation_waits_for_scroll_to_settle(cx: &mut TestAppContext) {
+        let scroll = ScrollHandle::new();
+        let transitions = Rc::new(RefCell::new(Vec::new()));
+        let (_, cx) = cx.add_window_view({
+            let scroll = scroll.clone();
+            let transitions = transitions.clone();
+            move |_, _| HoverScrollTestView {
+                scroll,
+                layout_shift: false,
+                transitions,
+            }
+        });
+        let draw = |cx: &mut VisualTestContext| {
+            cx.update(|window, app| window.draw(app).clear(app));
+        };
+        draw(cx);
+
+        cx.simulate_event(MouseMoveEvent {
+            position: point(px(20.), px(20.)),
+            ..Default::default()
+        });
+        draw(cx);
+        assert_eq!(*transitions.borrow(), [(0, true)]);
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(20.), px(20.)),
+            delta: crate::ScrollDelta::Pixels(point(px(0.), px(-40.))),
+            touch_phase: crate::TouchPhase::Started,
+            ..Default::default()
+        });
+        assert!(cx.update(|window, _| window.scroll_hover_active_for_test()));
+        draw(cx);
+        assert_eq!(*transitions.borrow(), [(0, true)]);
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(20.), px(20.)),
+            delta: crate::ScrollDelta::Pixels(point(px(0.), px(-40.))),
+            touch_phase: crate::TouchPhase::Moved,
+            ..Default::default()
+        });
+        assert!(cx.update(|window, _| window.scroll_hover_active_for_test()));
+        draw(cx);
+        assert_eq!(*transitions.borrow(), [(0, true)]);
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(20.), px(20.)),
+            delta: crate::ScrollDelta::Pixels(Point::default()),
+            touch_phase: crate::TouchPhase::Ended,
+            ..Default::default()
+        });
+        draw(cx);
+        assert_eq!(*transitions.borrow(), [(0, true), (0, false), (2, true)]);
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(20.), px(20.)),
+            delta: crate::ScrollDelta::Pixels(point(px(0.), px(-40.))),
+            touch_phase: crate::TouchPhase::Started,
+            ..Default::default()
+        });
+        draw(cx);
+        cx.simulate_event(MouseMoveEvent {
+            position: point(px(20.), px(20.)),
+            ..Default::default()
+        });
+        draw(cx);
+        let mut final_transitions = transitions.borrow()[3..].to_vec();
+        final_transitions.sort_unstable();
+        assert_eq!(final_transitions, [(2, false), (3, true)]);
+    }
+
+    #[gpui::test]
+    fn hover_reconciliation_retests_for_non_scroll_layout_changes(cx: &mut TestAppContext) {
+        let scroll = ScrollHandle::new();
+        let transitions = Rc::new(RefCell::new(Vec::new()));
+        let (view, cx) = cx.add_window_view({
+            let scroll = scroll.clone();
+            let transitions = transitions.clone();
+            move |_, _| HoverScrollTestView {
+                scroll,
+                layout_shift: false,
+                transitions,
+            }
+        });
+        let draw = |cx: &mut VisualTestContext| {
+            cx.update(|window, app| window.draw(app).clear(app));
+        };
+        draw(cx);
+
+        cx.simulate_event(MouseMoveEvent {
+            position: point(px(20.), px(20.)),
+            ..Default::default()
+        });
+        draw(cx);
+        assert_eq!(*transitions.borrow(), [(0, true)]);
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(20.), px(20.)),
+            delta: crate::ScrollDelta::Pixels(point(px(0.), px(-40.))),
+            touch_phase: crate::TouchPhase::Started,
+            ..Default::default()
+        });
+        draw(cx);
+        assert_eq!(*transitions.borrow(), [(0, true)]);
+
+        view.update(cx, |view, cx| {
+            view.layout_shift = true;
+            cx.notify();
+        });
+        draw(cx);
+
+        let mut layout_transitions = transitions.borrow()[1..].to_vec();
+        layout_transitions.sort_unstable();
+        assert_eq!(layout_transitions, [(0, false), (3, true)]);
     }
 
     fn setup_tooltip_owner_test(
