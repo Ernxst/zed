@@ -51,6 +51,15 @@ pub struct WindowsWindowState {
     pub appearance: Cell<WindowAppearance>,
     pub background_appearance: Cell<WindowBackgroundAppearance>,
     pub scale_factor: Cell<f32>,
+    /// Set for visual-test windows opened with an explicit virtual scale factor.
+    /// The window's scale is pinned to this value regardless of the monitor's
+    /// DPI, and `WM_DPICHANGED` is ignored, mirroring the macOS virtual-scale
+    /// visual-test windows.
+    pub virtual_display_scale_factor: Option<f32>,
+    /// Physical size a visual-test window must not be capped below by the
+    /// default `WM_GETMINMAXINFO` maximum, which otherwise shrinks a window
+    /// whose requested logical size × scale exceeds the host display.
+    pub max_track_size: Cell<Option<Size<DevicePixels>>>,
     pub restore_from_minimized: Cell<Option<Box<dyn FnMut(RequestFrameOptions)>>>,
 
     pub callbacks: Callbacks,
@@ -120,8 +129,12 @@ impl WindowsWindowState {
         disable_direct_composition: bool,
         invalidate_devices: Arc<AtomicBool>,
         draw_coordinator: Rc<DrawCoordinator>,
+        virtual_display_scale_factor: Option<f32>,
     ) -> Result<Self> {
-        let scale_factor = {
+        let scale_factor = if let Some(virtual_display_scale_factor) = virtual_display_scale_factor
+        {
+            virtual_display_scale_factor
+        } else {
             let monitor_dpi = unsafe { GetDpiForWindow(hwnd) } as f32;
             monitor_dpi / USER_DEFAULT_SCREEN_DPI as f32
         };
@@ -163,6 +176,8 @@ impl WindowsWindowState {
             appearance: Cell::new(appearance),
             background_appearance: Cell::new(WindowBackgroundAppearance::Opaque),
             scale_factor: Cell::new(scale_factor),
+            virtual_display_scale_factor,
+            max_track_size: Cell::new(None),
             restore_from_minimized: Cell::new(restore_from_minimized),
             min_size,
             callbacks,
@@ -262,6 +277,7 @@ impl WindowsWindowInner {
             context.disable_direct_composition,
             context.invalidate_devices.clone(),
             context.draw_coordinator.clone(),
+            context.virtual_display_scale_factor,
         )?;
 
         Ok(Rc::new(Self {
@@ -411,6 +427,7 @@ struct WindowCreateContext {
     invalidate_devices: Arc<AtomicBool>,
     draw_coordinator: Rc<DrawCoordinator>,
     parent_hwnd: Option<HWND>,
+    virtual_display_scale_factor: Option<f32>,
 }
 
 impl WindowsWindow {
@@ -419,6 +436,7 @@ impl WindowsWindow {
         params: WindowParams,
         creation_info: WindowCreationInfo,
         virtual_display_bounds: Option<Bounds<Pixels>>,
+        virtual_display_scale_factor: Option<f32>,
     ) -> Result<Self> {
         // Native popups are not implemented on Windows yet. Rejecting lets callers fall back to
         // gpui's in-window popovers.
@@ -525,6 +543,7 @@ impl WindowsWindow {
             invalidate_devices,
             draw_coordinator,
             parent_hwnd,
+            virtual_display_scale_factor,
         };
         let creation_result = unsafe {
             CreateWindowExW(
@@ -559,7 +578,20 @@ impl WindowsWindow {
             params.bounds,
             &this.state.border_offset,
             virtual_display_bounds,
+            virtual_display_scale_factor,
         )?;
+        if virtual_display_bounds.is_some() {
+            // Visual-test windows must keep their requested logical size × scale in
+            // physical pixels even when that exceeds the host display, so the default
+            // `WM_GETMINMAXINFO` maximum (roughly the display size) must not shrink
+            // them. `rcNormalPosition` already holds that physical size, non-client
+            // area included, from the conversion above.
+            let rect = placement.rcNormalPosition;
+            this.state.max_track_size.set(Some(size(
+                DevicePixels(rect.right - rect.left),
+                DevicePixels(rect.bottom - rect.top),
+            )));
+        }
         if params.show {
             let mut placement = placement;
             if !params.focus {
@@ -1529,6 +1561,7 @@ fn retrieve_window_placement(
     initial_bounds: Bounds<Pixels>,
     border_offset: &WindowBorderOffset,
     virtual_display_bounds: Option<Bounds<Pixels>>,
+    virtual_display_scale_factor: Option<f32>,
 ) -> Result<WINDOWPLACEMENT> {
     let mut placement = WINDOWPLACEMENT {
         length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
@@ -1549,7 +1582,12 @@ fn retrieve_window_placement(
     // monitor Windows picked by default, which can have a different DPI than `display`
     // and would otherwise throw off the physical position (e.g. leaving the window
     // partially off-screen when moved to a monitor with a different scale factor).
-    let bounds = bounds.to_device_pixels(display.scale_factor());
+    //
+    // A visual-test window with a virtual scale factor uses that scale instead: its
+    // content is sized for the virtual scale regardless of which real monitor it
+    // lands on, mirroring the macOS virtual-scale visual-test windows.
+    let scale_factor = virtual_display_scale_factor.unwrap_or_else(|| display.scale_factor());
+    let bounds = bounds.to_device_pixels(scale_factor);
     placement.rcNormalPosition = calculate_window_rect(bounds, border_offset);
     Ok(placement)
 }

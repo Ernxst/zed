@@ -222,19 +222,37 @@ impl WindowsWindowInner {
     }
 
     fn handle_get_min_max_info_msg(&self, lparam: LPARAM) -> Option<isize> {
-        let min_size = self.state.min_size?;
+        let min_size = self.state.min_size;
+        let max_track_size = self.state.max_track_size.get();
+        if min_size.is_none() && max_track_size.is_none() {
+            return None;
+        }
         let scale_factor = self.state.scale_factor.get();
         let boarder_offset = &self.state.border_offset;
 
         unsafe {
             let minmax_info = &mut *(lparam.0 as *mut MINMAXINFO);
-            if let Some(width) = min_size.width {
-                minmax_info.ptMinTrackSize.x = width.scale(scale_factor).as_f32() as i32
-                    + boarder_offset.width_offset.get();
+            if let Some(min_size) = min_size {
+                if let Some(width) = min_size.width {
+                    minmax_info.ptMinTrackSize.x = width.scale(scale_factor).as_f32() as i32
+                        + boarder_offset.width_offset.get();
+                }
+                if let Some(height) = min_size.height {
+                    minmax_info.ptMinTrackSize.y = height.scale(scale_factor).as_f32() as i32
+                        + boarder_offset.height_offset.get();
+                }
             }
-            if let Some(height) = min_size.height {
-                minmax_info.ptMinTrackSize.y = height.scale(scale_factor).as_f32() as i32
-                    + boarder_offset.height_offset.get();
+            // Visual-test windows must not be capped by the default maximum (roughly
+            // the display size): their requested logical size × scale can exceed it.
+            // Widen the defaults rather than replace them, so a later resize can
+            // still grow the window past its opening size.
+            if let Some(max_track_size) = max_track_size {
+                minmax_info.ptMaxTrackSize.x =
+                    minmax_info.ptMaxTrackSize.x.max(max_track_size.width.0);
+                minmax_info.ptMaxTrackSize.y =
+                    minmax_info.ptMaxTrackSize.y.max(max_track_size.height.0);
+                minmax_info.ptMaxSize.x = minmax_info.ptMaxSize.x.max(max_track_size.width.0);
+                minmax_info.ptMaxSize.y = minmax_info.ptMaxSize.y.max(max_track_size.height.0);
             }
         }
         Some(0)
@@ -883,12 +901,22 @@ impl WindowsWindowInner {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> Option<isize> {
+        // Windows redraws the frame at the new DPI either way, so the stored
+        // frame offset must follow it even for a virtual-scale window.
+        self.state.border_offset.update(handle).log_err();
+
+        // A visual-test window with a virtual scale factor reports that scale
+        // regardless of which monitor it lands on; DPI changes on the host
+        // display must not override it.
+        if self.state.virtual_display_scale_factor.is_some() {
+            return Some(0);
+        }
+
         let new_dpi = wparam.loword() as f32;
 
         let is_maximized = self.state.is_maximized();
         let new_scale_factor = new_dpi / USER_DEFAULT_SCREEN_DPI as f32;
         self.state.scale_factor.set(new_scale_factor);
-        self.state.border_offset.update(handle).log_err();
 
         self.state
             .direct_manipulation
