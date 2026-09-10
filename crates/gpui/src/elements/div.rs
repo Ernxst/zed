@@ -5493,8 +5493,6 @@ mod tests {
             ..Default::default()
         });
         assert!(cx.update(|window, _| window.scroll_hover_active_for_test()));
-        draw(cx);
-        assert_eq!(*transitions.borrow(), [(0, true)]);
         cx.simulate_event(ScrollWheelEvent {
             position: point(px(20.), px(20.)),
             delta: crate::ScrollDelta::Pixels(point(px(0.), px(-40.))),

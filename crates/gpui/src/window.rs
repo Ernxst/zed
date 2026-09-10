@@ -123,7 +123,7 @@ struct WindowInvalidatorInner {
     pub dirty: bool,
     pub draw_phase: DrawPhase,
     pub dirty_views: FxHashSet<EntityId>,
-    pub scroll_views: FxHashSet<EntityId>,
+    pub scroll_view_counts: FxHashMap<EntityId, usize>,
     pub saw_scroll_invalidation: bool,
     pub saw_non_scroll_invalidation: bool,
     pub update_count: usize,
@@ -158,7 +158,7 @@ impl WindowInvalidator {
                 dirty: true,
                 draw_phase: DrawPhase::None,
                 dirty_views: FxHashSet::default(),
-                scroll_views: FxHashSet::default(),
+                scroll_view_counts: FxHashMap::default(),
                 saw_scroll_invalidation: false,
                 saw_non_scroll_invalidation: false,
                 update_count: 0,
@@ -172,7 +172,15 @@ impl WindowInvalidator {
     pub fn invalidate_view(&self, entity: EntityId, cx: &mut App) -> bool {
         let mut inner = self.inner.borrow_mut();
         inner.update_count += 1;
-        if inner.scroll_views.remove(&entity) {
+        let remove_scroll_count = inner.scroll_view_counts.get_mut(&entity).map(|count| {
+            *count -= 1;
+            *count == 0
+        });
+        let is_scroll_invalidation = remove_scroll_count.is_some();
+        if remove_scroll_count == Some(true) {
+            inner.scroll_view_counts.remove(&entity);
+        }
+        if is_scroll_invalidation {
             inner.saw_scroll_invalidation = true;
         } else {
             inner.saw_non_scroll_invalidation = true;
@@ -272,8 +280,13 @@ impl WindowInvalidator {
         mem::take(&mut self.inner.borrow_mut().dirty_views)
     }
 
-    pub fn mark_scroll_view(&self, entity: EntityId) {
-        self.inner.borrow_mut().scroll_views.insert(entity);
+    pub fn mark_scroll_invalidation(&self, entity: EntityId) {
+        *self
+            .inner
+            .borrow_mut()
+            .scroll_view_counts
+            .entry(entity)
+            .or_default() += 1;
     }
 
     pub fn take_scroll_invalidation(&self) -> Option<bool> {
@@ -283,7 +296,7 @@ impl WindowInvalidator {
         } else {
             Some(inner.saw_scroll_invalidation && !inner.saw_non_scroll_invalidation)
         };
-        inner.scroll_views.clear();
+        inner.scroll_view_counts.clear();
         inner.saw_scroll_invalidation = false;
         inner.saw_non_scroll_invalidation = false;
         invalidation
@@ -2295,7 +2308,7 @@ impl Window {
     }
 
     pub(crate) fn mark_scroll_invalidation(&self, entity: EntityId) {
-        self.invalidator.mark_scroll_view(entity);
+        self.invalidator.mark_scroll_invalidation(entity);
     }
 
     /// Reports whether the platform frame loop would redraw this window.
