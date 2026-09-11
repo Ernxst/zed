@@ -353,7 +353,12 @@ impl VisualTestAppContext {
 
     /// Simulates an input event on the given window.
     pub fn simulate_event<E: InputEvent>(&mut self, window: AnyWindowHandle, event: E) {
-        self.draw_window(window);
+        self.update_window(window, |_, window, cx| {
+            if window.is_dirty() {
+                window.draw(cx).clear(cx);
+            }
+        })
+        .ok();
         self.update_window(window, |_, window, cx| {
             window.dispatch_event(event.to_platform_input(), cx);
         })
