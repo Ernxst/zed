@@ -11,7 +11,7 @@ use crate::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, DispatchPhase, Edges, Element, EntityId,
     ElementId, FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
     InteractiveElement, Interactivity, IntoElement, Overflow, Pixels, Point, ScrollWheelEvent,
-    Size, Style, StyleRefinement, Styled, Window, point, px, size,
+    Size, Style, StyleRefinement, Styled, Visibility, Window, point, px, size,
 };
 use collections::VecDeque;
 use refineable::Refineable as _;
@@ -1655,8 +1655,9 @@ impl Element for List {
         window: &mut Window,
         cx: &mut App,
     ) {
-        // Accessibility actions are the one piece of Interactivity listener
-        // plumbing that List runs; its other listener machinery remains unused.
+        // Accessibility actions and the paint-bounds listener are the two
+        // pieces of Interactivity listener plumbing that List runs; its other
+        // listener machinery remains unused.
         if window.a11y.is_active()
             && let Some(global_id) = global_id
             && !self.interactivity.a11y_action_listeners.is_empty()
@@ -1665,6 +1666,14 @@ impl Element for List {
             for (action, listener) in self.interactivity.a11y_action_listeners.drain(..) {
                 window.on_a11y_action(node_id, action, listener);
             }
+        }
+
+        let mut style = Style::default();
+        style.refine(&self.style);
+        if style.visibility != Visibility::Hidden
+            && let Some(listener) = self.interactivity.paint_bounds_listener.take()
+        {
+            listener(bounds, window, cx);
         }
 
         let current_view = window.current_view();
