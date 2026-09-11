@@ -5224,11 +5224,11 @@ impl Window {
 
         let scale_factor = self.scale_factor();
         let bounds = bounds.scale(scale_factor);
-        let content_mask = self.content_mask().scale(scale_factor);
+        let clip_id = self.current_clip_id();
         self.next_frame.scene.insert_primitive(PaintSurface {
             order: 0,
             bounds,
-            content_mask,
+            clip_id,
             texture,
             texture_size,
         });

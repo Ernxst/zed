@@ -1598,7 +1598,7 @@ impl WgpuRenderer {
                         &mut pass,
                     ),
                     PrimitiveBatch::Surfaces(range) => {
-                        self.draw_surfaces(&scene.surfaces[range], &mut pass)
+                        self.draw_surfaces(&scene.surfaces[range], &scene.clips, &mut pass)
                     }
                 }
             }
@@ -1612,7 +1612,12 @@ impl WgpuRenderer {
 
     // Ported from gpui-ce #39 / #121: sample an RGBA wgpu texture in the scene.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    fn draw_surfaces(&self, surfaces: &[gpui::PaintSurface], pass: &mut wgpu::RenderPass<'_>) {
+    fn draw_surfaces(
+        &self,
+        surfaces: &[gpui::PaintSurface],
+        clips: &[ClipNode],
+        pass: &mut wgpu::RenderPass<'_>,
+    ) {
         let resources = self.resources();
         for surface in surfaces {
             let Some(wgpu_texture) = surface.texture.downcast_ref::<wgpu::Texture>() else {
@@ -1621,9 +1626,13 @@ impl WgpuRenderer {
 
             let texture_view = wgpu_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+            // A missing node means no clip applies, so the surface masks to itself.
+            let content_mask = clips
+                .get(surface.clip_id as usize)
+                .map_or(surface.bounds, |node| node.folded_bounds);
             let params = SurfaceParams {
                 bounds: surface.bounds.into(),
-                content_mask: surface.content_mask.bounds.into(),
+                content_mask: content_mask.into(),
             };
 
             resources.queue.write_buffer(
@@ -1661,7 +1670,13 @@ impl WgpuRenderer {
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-    fn draw_surfaces(&self, _surfaces: &[gpui::PaintSurface], _pass: &mut wgpu::RenderPass<'_>) {}
+    fn draw_surfaces(
+        &self,
+        _surfaces: &[gpui::PaintSurface],
+        _clips: &[ClipNode],
+        _pass: &mut wgpu::RenderPass<'_>,
+    ) {
+    }
 
     fn write_instances(
         &mut self,
