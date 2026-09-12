@@ -960,6 +960,16 @@ fragment float4 surface_fragment(SurfaceFragmentInput input [[stage_in]],
   return color;
 }
 
+fragment float4 rgba_surface_fragment(
+    SurfaceFragmentInput input [[stage_in]],
+    texture2d<float> texture [[texture(SurfaceInputIndex_YTexture)]],
+    constant ClipNode *clips [[buffer(ClipsInputIndex_Clips)]]) {
+  constexpr sampler texture_sampler(mag_filter::linear, min_filter::linear);
+  float4 color = texture.sample(texture_sampler, input.texture_position);
+  color.a *= clip_chain_alpha(input.position.xy, input.rounded_head, clips);
+  return color;
+}
+
 float4 hsla_to_rgba(Hsla hsla) {
   float h = hsla.h * 6.0; // Now, it's an angle but scaled in [0, 6) range
   float s = hsla.s;

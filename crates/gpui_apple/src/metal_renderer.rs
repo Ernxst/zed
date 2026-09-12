@@ -8,7 +8,7 @@ use cocoa::{
 };
 use gpui::{
     AtlasTextureId, Background, Bounds, ClipNode, DevicePixels, PaintSurface, Path, Point,
-    PrimitiveBatch, ScaledPixels, Scene, Size, point, size,
+    PaintSurfaceSource, PrimitiveBatch, ScaledPixels, Scene, Size, point, size,
 };
 #[cfg(any(test, feature = "test-support"))]
 use image::RgbaImage;
@@ -126,6 +126,7 @@ pub struct MetalRenderer {
     monochrome_sprites_pipeline_state: metal::RenderPipelineState,
     polychrome_sprites_pipeline_state: metal::RenderPipelineState,
     surfaces_pipeline_state: metal::RenderPipelineState,
+    rgba_surfaces_pipeline_state: metal::RenderPipelineState,
     unit_vertices: metal::Buffer,
     #[allow(clippy::arc_with_non_send_sync)]
     instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
@@ -138,6 +139,44 @@ pub struct MetalRenderer {
     /// rendering headlessly without reading pixels back.
     #[cfg(any(test, feature = "test-support"))]
     headless_render_target: Option<metal::Texture>,
+}
+
+/// A retained RGBA Metal texture presented through GPUI's surface scene path.
+///
+/// `owner` keeps the producer-side resource alive until every scene reference
+/// to this surface retires. The compositor waits for `ready_event` before it
+/// samples the texture, so separate producer and compositor command queues do
+/// not depend on submission timing.
+pub struct MetalTextureSurface {
+    pub texture: metal::Texture,
+    pub ready_event: metal::SharedEvent,
+    pub ready_value: u64,
+    _owner: Arc<dyn std::any::Any + Send + Sync>,
+}
+
+impl MetalTextureSurface {
+    pub fn new(
+        texture: metal::Texture,
+        ready_value: u64,
+        owner: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Self {
+        // The event is created by the texture's MTLDevice, so a future
+        // producer signal and compositor wait necessarily address one device.
+        let ready_event = texture.device().new_shared_event();
+        Self {
+            texture,
+            ready_event,
+            ready_value,
+            _owner: owner,
+        }
+    }
+
+    pub fn surface_source(self, size: Size<DevicePixels>) -> gpui::SurfaceSource {
+        gpui::SurfaceSource::Texture {
+            texture: Arc::new(self),
+            size,
+        }
+    }
 }
 
 #[repr(C)]
@@ -326,6 +365,14 @@ impl MetalRenderer {
             "surface_fragment",
             MTLPixelFormat::BGRA8Unorm,
         );
+        let rgba_surfaces_pipeline_state = build_pipeline_state(
+            &device,
+            &library,
+            "rgba_surfaces",
+            "surface_vertex",
+            "rgba_surface_fragment",
+            MTLPixelFormat::BGRA8Unorm,
+        );
 
         let command_queue = device.new_command_queue();
         let sprite_atlas = Arc::new(MetalAtlas::new(device.clone(), is_apple_gpu));
@@ -348,6 +395,7 @@ impl MetalRenderer {
             monochrome_sprites_pipeline_state,
             polychrome_sprites_pipeline_state,
             surfaces_pipeline_state,
+            rgba_surfaces_pipeline_state,
             unit_vertices,
             instance_buffer_pool,
             sprite_atlas,
@@ -662,6 +710,23 @@ impl MetalRenderer {
         let command_queue = self.command_queue.clone();
         let command_buffer = command_queue.new_command_buffer();
         let alpha = if self.opaque { 1. } else { 0. };
+
+        // A producer may submit to a distinct MTLCommandQueue. Encode the
+        // dependency in this command buffer before any surface sampling; do
+        // not make presentation depend on queue timing or CPU pixel transfer.
+        for surface in &scene.surfaces {
+            let PaintSurfaceSource::Texture { texture, .. } = &surface.source else {
+                continue;
+            };
+            let Some(surface) = texture.downcast_ref::<MetalTextureSurface>() else {
+                log::error!("unsupported macOS texture surface bridge");
+                continue;
+            };
+            if surface.texture.device().registry_id() != self.device.registry_id() {
+                anyhow::bail!("texture surface MTLDevice differs from the compositor MTLDevice");
+            }
+            command_buffer.encode_wait_for_event(&surface.ready_event, surface.ready_value);
+        }
 
         // Upload the scene's clip nodes once; they are bound on every command encoder
         // so all pipelines can evaluate rounded clips.
@@ -1149,7 +1214,6 @@ impl MetalRenderer {
             return;
         }
 
-        command_encoder.set_render_pipeline_state(&self.surfaces_pipeline_state);
         command_encoder.set_vertex_buffer(
             SurfaceInputIndex::Vertices as u64,
             Some(&self.unit_vertices),
@@ -1167,53 +1231,73 @@ impl MetalRenderer {
         );
 
         for (index, surface) in surfaces.iter().enumerate() {
-            let texture_size = size(
-                DevicePixels::from(surface.image_buffer.get_width() as i32),
-                DevicePixels::from(surface.image_buffer.get_height() as i32),
-            );
-
-            assert_eq!(
-                surface.image_buffer.get_pixel_format(),
-                kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
-            );
-
-            let y_texture = self
-                .core_video_texture_cache
-                .create_texture_from_image(
-                    surface.image_buffer.as_concrete_TypeRef(),
-                    None,
-                    MTLPixelFormat::R8Unorm,
-                    surface.image_buffer.get_width_of_plane(0),
-                    surface.image_buffer.get_height_of_plane(0),
-                    0,
-                )
-                .unwrap();
-            let cb_cr_texture = self
-                .core_video_texture_cache
-                .create_texture_from_image(
-                    surface.image_buffer.as_concrete_TypeRef(),
-                    None,
-                    MTLPixelFormat::RG8Unorm,
-                    surface.image_buffer.get_width_of_plane(1),
-                    surface.image_buffer.get_height_of_plane(1),
-                    1,
-                )
-                .unwrap();
-
-            command_encoder.set_vertex_bytes(
-                SurfaceInputIndex::TextureSize as u64,
-                mem::size_of_val(&texture_size) as u64,
-                &texture_size as *const Size<DevicePixels> as *const _,
-            );
-            // let y_texture = y_texture.get_texture().unwrap().
-            command_encoder.set_fragment_texture(SurfaceInputIndex::YTexture as u64, unsafe {
-                let texture = CVMetalTextureGetTexture(y_texture.as_concrete_TypeRef());
-                Some(metal::TextureRef::from_ptr(texture as *mut _))
-            });
-            command_encoder.set_fragment_texture(SurfaceInputIndex::CbCrTexture as u64, unsafe {
-                let texture = CVMetalTextureGetTexture(cb_cr_texture.as_concrete_TypeRef());
-                Some(metal::TextureRef::from_ptr(texture as *mut _))
-            });
+            match &surface.source {
+                PaintSurfaceSource::ImageBuffer(image_buffer) => {
+                    let texture_size = size(
+                        DevicePixels::from(image_buffer.get_width() as i32),
+                        DevicePixels::from(image_buffer.get_height() as i32),
+                    );
+                    assert_eq!(
+                        image_buffer.get_pixel_format(),
+                        kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+                    );
+                    let y_texture = self
+                        .core_video_texture_cache
+                        .create_texture_from_image(
+                            image_buffer.as_concrete_TypeRef(),
+                            None,
+                            MTLPixelFormat::R8Unorm,
+                            image_buffer.get_width_of_plane(0),
+                            image_buffer.get_height_of_plane(0),
+                            0,
+                        )
+                        .unwrap();
+                    let cb_cr_texture = self
+                        .core_video_texture_cache
+                        .create_texture_from_image(
+                            image_buffer.as_concrete_TypeRef(),
+                            None,
+                            MTLPixelFormat::RG8Unorm,
+                            image_buffer.get_width_of_plane(1),
+                            image_buffer.get_height_of_plane(1),
+                            1,
+                        )
+                        .unwrap();
+                    command_encoder.set_render_pipeline_state(&self.surfaces_pipeline_state);
+                    command_encoder.set_vertex_bytes(
+                        SurfaceInputIndex::TextureSize as u64,
+                        mem::size_of_val(&texture_size) as u64,
+                        &texture_size as *const Size<DevicePixels> as *const _,
+                    );
+                    command_encoder.set_fragment_texture(SurfaceInputIndex::YTexture as u64, unsafe {
+                        let texture = CVMetalTextureGetTexture(y_texture.as_concrete_TypeRef());
+                        Some(metal::TextureRef::from_ptr(texture as *mut _))
+                    });
+                    command_encoder.set_fragment_texture(SurfaceInputIndex::CbCrTexture as u64, unsafe {
+                        let texture = CVMetalTextureGetTexture(cb_cr_texture.as_concrete_TypeRef());
+                        Some(metal::TextureRef::from_ptr(texture as *mut _))
+                    });
+                }
+                PaintSurfaceSource::Texture {
+                    texture,
+                    texture_size,
+                } => {
+                    let Some(surface) = texture.downcast_ref::<MetalTextureSurface>() else {
+                        log::error!("unsupported macOS texture surface bridge");
+                        continue;
+                    };
+                    command_encoder.set_render_pipeline_state(&self.rgba_surfaces_pipeline_state);
+                    command_encoder.set_vertex_bytes(
+                        SurfaceInputIndex::TextureSize as u64,
+                        mem::size_of_val(texture_size) as u64,
+                        texture_size as *const Size<DevicePixels> as *const _,
+                    );
+                    command_encoder.set_fragment_texture(
+                        SurfaceInputIndex::YTexture as u64,
+                        Some(&surface.texture),
+                    );
+                }
+            }
 
             command_encoder.draw_primitives_instanced_base_instance(
                 metal::MTLPrimitiveType::Triangle,
@@ -1669,5 +1753,184 @@ impl gpui::PlatformHeadlessRenderer for MetalHeadlessRenderer {
 
     fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
         self.renderer.sprite_atlas().clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{ClipNode, PaintSurface, PaintSurfaceSource, Scene, ScaledPixels, bounds, point};
+    use std::sync::Arc;
+
+    fn wgpu_device() -> (wgpu::Device, wgpu::Queue) {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            force_fallback_adapter: false,
+            ..Default::default()
+        }))
+        .expect("a hardware Metal adapter is required for this proof");
+        assert_ne!(adapter.get_info().device_type, wgpu::DeviceType::Cpu);
+        pollster::block_on(adapter.request_device(&Default::default())).unwrap()
+    }
+
+    fn retained_metal_texture(texture: &wgpu::Texture) -> metal::Texture {
+        let texture = unsafe { texture.as_hal::<wgpu::hal::api::Metal>() }
+            .expect("wgpu texture must use Metal");
+        let raw = texture.raw_handle() as *const _ as *mut objc::runtime::Object;
+        let retained = unsafe { msg_send![raw, retain] };
+        unsafe { metal::Texture::from_ptr(retained) }
+    }
+
+    fn scene_bounds(width: f32, height: f32) -> Bounds<ScaledPixels> {
+        bounds(
+            point(ScaledPixels(0.), ScaledPixels(0.)),
+            size(ScaledPixels(width), ScaledPixels(height)),
+        )
+    }
+
+    #[test]
+    fn wgpu_metal_texture_waits_then_composites_without_producer_readback() {
+        let (device, queue) = wgpu_device();
+        let texture = Arc::new(device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("native WebGPU presentation proof"),
+            size: wgpu::Extent3d {
+                width: 32,
+                height: 32,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Bgra8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        }));
+        let view = texture.create_view(&Default::default());
+        let mut producer = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("changing WebGPU producer frame"),
+        });
+        {
+            let _pass = producer.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("clear a changing producer frame"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::RED),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+        queue.submit([producer.finish()]);
+
+        let metal_texture = retained_metal_texture(&texture);
+        let source = MetalTextureSurface::new(metal_texture, 1, texture.clone());
+        let event = source.ready_event.clone();
+        let gpui::SurfaceSource::Texture { texture, .. } = source.surface_source(size(
+            DevicePixels(32),
+            DevicePixels(32),
+        )) else {
+            unreachable!();
+        };
+
+        let mut scene = Scene::default();
+        let clip_id = scene.insert_clip(ClipNode {
+            folded_bounds: scene_bounds(64., 64.),
+            rounded_bounds: Default::default(),
+            corner_radii: Default::default(),
+            rounded_head: ClipNode::NONE,
+            parent_rounded: ClipNode::NONE,
+        });
+        scene.insert_primitive(PaintSurface {
+            order: 0,
+            bounds: scene_bounds(64., 64.),
+            clip_id,
+            source: PaintSurfaceSource::Texture {
+                texture,
+                texture_size: size(DevicePixels(32), DevicePixels(32)),
+            },
+        });
+
+        let blue_texture = Arc::new(device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("second native WebGPU presentation proof"),
+            size: wgpu::Extent3d { width: 32, height: 32, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Bgra8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        }));
+        let mut producer = device.create_command_encoder(&Default::default());
+        {
+            let view = blue_texture.create_view(&Default::default());
+            let _pass = producer.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("second changing producer frame"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLUE), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+        queue.submit([producer.finish()]);
+        let blue_source = MetalTextureSurface::new(retained_metal_texture(&blue_texture), 1, blue_texture);
+        let blue_event = blue_source.ready_event.clone();
+        let gpui::SurfaceSource::Texture { texture, .. } = blue_source.surface_source(size(
+            DevicePixels(32), DevicePixels(32),
+        )) else { unreachable!() };
+        let blue_clip = scene.insert_clip(ClipNode {
+            folded_bounds: scene_bounds(48., 48.),
+            rounded_bounds: Default::default(),
+            corner_radii: Default::default(),
+            rounded_head: ClipNode::NONE,
+            parent_rounded: ClipNode::NONE,
+        });
+        scene.insert_primitive(PaintSurface {
+            order: 0,
+            bounds: bounds(
+                point(ScaledPixels(32.), ScaledPixels(32.)),
+                size(ScaledPixels(32.), ScaledPixels(32.)),
+            ),
+            clip_id: blue_clip,
+            source: PaintSurfaceSource::Texture { texture, texture_size: size(DevicePixels(32), DevicePixels(32)) },
+        });
+
+        let mut renderer = MetalRenderer::new_headless(Arc::new(Mutex::new(InstanceBufferPool::default())));
+        let descriptor = metal::TextureDescriptor::new();
+        descriptor.set_width(64);
+        descriptor.set_height(64);
+        descriptor.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+        descriptor.set_usage(metal::MTLTextureUsage::RenderTarget);
+        descriptor.set_storage_mode(metal::MTLStorageMode::Managed);
+        let output = renderer.device.new_texture(&descriptor);
+        let compositor = renderer
+            .render_frame(&scene, &output, size(DevicePixels(64), DevicePixels(64)))
+            .unwrap();
+        compositor.commit();
+
+        // Completion is the producer's exact queue boundary. Only after it is
+        // complete does the producer publish the event value the compositor is
+        // waiting for; no CPU pixel mapping or texture copy participates.
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        event.set_signaled_value(1);
+        blue_event.set_signaled_value(1);
+        compositor.wait_until_completed();
+
+        let image = read_texture_to_image(&output).unwrap();
+        assert_eq!(image.get_pixel(16, 16).0, [255, 0, 0, 255]);
+        assert_eq!(image.get_pixel(40, 40).0, [0, 0, 255, 255]);
+        assert_eq!(image.get_pixel(56, 56).0, [255, 0, 0, 255]);
     }
 }

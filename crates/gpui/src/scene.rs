@@ -874,13 +874,26 @@ pub struct PaintSurface {
     pub bounds: Bounds<ScaledPixels>,
     pub clip_id: u32,
     #[cfg(target_os = "macos")]
-    pub image_buffer: core_video::pixel_buffer::CVPixelBuffer,
+    pub source: PaintSurfaceSource,
     /// Type-erased GPU texture (`Arc<wgpu::Texture>`). Ported from gpui-ce
     /// ([#39](https://github.com/gpui-ce/gpui-ce/commit/6d043b22e477)).
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub texture: std::sync::Arc<dyn std::any::Any + Send + Sync>,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub texture_size: Size<crate::DevicePixels>,
+}
+
+/// The macOS renderer's surface source. Texture ownership stays type-erased at
+/// the scene boundary so that GPUI does not depend on a particular Metal bridge.
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+#[allow(missing_docs)]
+pub enum PaintSurfaceSource {
+    ImageBuffer(core_video::pixel_buffer::CVPixelBuffer),
+    Texture {
+        texture: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+        texture_size: Size<crate::DevicePixels>,
+    },
 }
 
 impl std::fmt::Debug for PaintSurface {
@@ -891,7 +904,14 @@ impl std::fmt::Debug for PaintSurface {
             .field("bounds", &self.bounds)
             .field("clip_id", &self.clip_id);
         #[cfg(target_os = "macos")]
-        debug.field("image_buffer", &self.image_buffer);
+        match &self.source {
+            PaintSurfaceSource::ImageBuffer(image_buffer) => {
+                debug.field("image_buffer", image_buffer);
+            }
+            PaintSurfaceSource::Texture { texture_size, .. } => {
+                debug.field("texture_size", texture_size);
+            }
+        }
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         debug.field("texture_size", &self.texture_size);
         debug.finish_non_exhaustive()

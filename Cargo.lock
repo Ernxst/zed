@@ -7588,6 +7588,8 @@ dependencies = [
  "metal",
  "objc",
  "parking_lot",
+ "pollster 0.4.0",
+ "wgpu",
 ]
 
 [[package]]
