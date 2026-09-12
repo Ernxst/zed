@@ -5199,7 +5199,35 @@ impl Window {
             order: 0,
             bounds,
             clip_id,
-            image_buffer,
+            source: crate::PaintSurfaceSource::ImageBuffer(image_buffer),
+        });
+    }
+
+    /// Paint a retained platform texture into the scene for the next frame.
+    ///
+    /// The concrete bridge is type-erased so GPUI itself remains independent of
+    /// the platform renderer's Metal ownership and synchronization types.
+    #[cfg(target_os = "macos")]
+    pub fn paint_texture_surface(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        texture: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+        texture_size: Size<DevicePixels>,
+    ) {
+        use crate::PaintSurface;
+
+        self.invalidator.debug_assert_paint();
+
+        let bounds = self.snap_bounds(bounds);
+        let clip_id = self.current_clip_id();
+        self.next_frame.scene.insert_primitive(PaintSurface {
+            order: 0,
+            bounds,
+            clip_id,
+            source: crate::PaintSurfaceSource::Texture {
+                texture,
+                texture_size,
+            },
         });
     }
 
