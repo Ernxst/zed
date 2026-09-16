@@ -57,6 +57,35 @@ pub enum DrawResult {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DrawableAcquisition {
+    NonBlocking,
+    Blocking,
+}
+
+fn drawable_acquisition(presents_with_transaction: bool) -> DrawableAcquisition {
+    if presents_with_transaction {
+        DrawableAcquisition::Blocking
+    } else {
+        DrawableAcquisition::NonBlocking
+    }
+}
+
+fn take_drawable_matching_viewport<T>(
+    mut take: impl FnMut() -> Option<T>,
+    mut drawable_size: impl FnMut(&T) -> (u64, u64),
+    mut viewport_size: impl FnMut() -> Size<DevicePixels>,
+) -> Option<(T, Size<DevicePixels>)> {
+    loop {
+        let drawable = take()?;
+        let viewport_size = viewport_size();
+        let dimensions = drawable_size(&drawable);
+        if dimensions == (viewport_size.width.0 as u64, viewport_size.height.0 as u64) {
+            return Some((drawable, viewport_size));
+        }
+    }
+}
+
 pub unsafe fn new_renderer(
     context: self::Context,
     _native_window: *mut c_void,
@@ -260,23 +289,30 @@ impl DrawableProvider {
     }
 
     fn take_ready(&self) -> Option<metal::MetalDrawable> {
-        let drawable = {
-            let (state, _) = &*self.state;
-            state.lock().ready.take()
-        };
+        let drawable = self.take_now();
         if drawable.is_some() {
-            self.wake_on_ready.store(false, Ordering::Release);
             return drawable;
         }
         self.request(true);
         None
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    fn take_now(&self) -> Option<metal::MetalDrawable> {
+        let drawable = {
+            let (state, _) = &*self.state;
+            state.lock().ready.take()
+        };
+        if drawable.is_some() {
+            self.wake_on_ready.store(false, Ordering::Release);
+        }
+        drawable
+    }
+
     fn take_blocking(&self) -> Option<metal::MetalDrawable> {
-        if let Some(drawable) = self.take_ready() {
+        if let Some(drawable) = self.take_now() {
             return Some(drawable);
         }
+        self.request(false);
         let (state, ready) = &*self.state;
         let mut state = state.lock();
         while state.ready.is_none() && state.acquisition_pending && state.worker_alive {
@@ -669,28 +705,32 @@ impl MetalRenderer {
                 return DrawResult::Failed;
             }
         };
-        let Some(drawable) = self
-            .drawable_provider
-            .as_ref()
-            .and_then(DrawableProvider::take_ready)
-        else {
-            return DrawResult::DrawablePending;
+        let acquisition = drawable_acquisition(self.presents_with_transaction);
+        let drawable = self.drawable_provider.as_ref().and_then(|provider| {
+            take_drawable_matching_viewport(
+                || match acquisition {
+                    DrawableAcquisition::NonBlocking => provider.take_ready(),
+                    DrawableAcquisition::Blocking => provider.take_blocking(),
+                },
+                |drawable| (drawable.texture().width(), drawable.texture().height()),
+                || {
+                    let drawable_size = layer.drawable_size();
+                    size(
+                        (drawable_size.width.ceil() as i32).into(),
+                        (drawable_size.height.ceil() as i32).into(),
+                    )
+                },
+            )
+        });
+        let Some((drawable, viewport_size)) = drawable else {
+            return match acquisition {
+                DrawableAcquisition::NonBlocking => DrawResult::DrawablePending,
+                DrawableAcquisition::Blocking => {
+                    log::error!("failed to acquire a drawable for transaction presentation");
+                    DrawResult::Failed
+                }
+            };
         };
-        let drawable_size = layer.drawable_size();
-        let viewport_size: Size<DevicePixels> = size(
-            (drawable_size.width.ceil() as i32).into(),
-            (drawable_size.height.ceil() as i32).into(),
-        );
-        if drawable.texture().width() != viewport_size.width.0 as u64
-            || drawable.texture().height() != viewport_size.height.0 as u64
-        {
-            // A resize can complete while acquisition waits. Release the stale drawable and ask
-            // for one matching the layer's current dimensions.
-            if let Some(provider) = &self.drawable_provider {
-                provider.request(true);
-            }
-            return DrawResult::DrawablePending;
-        }
         // Keep acquisition one frame ahead while frames are flowing. Starting before command
         // encoding leaves another pool slot available and avoids racing the next display-link tick.
         if let Some(provider) = &self.drawable_provider {
@@ -772,15 +812,22 @@ impl MetalRenderer {
             .layer
             .clone()
             .ok_or_else(|| anyhow::anyhow!("render_to_image requires a layer-backed renderer"))?;
-        let viewport_size = layer.drawable_size();
-        let viewport_size: Size<DevicePixels> = size(
-            (viewport_size.width.ceil() as i32).into(),
-            (viewport_size.height.ceil() as i32).into(),
-        );
-        let drawable = self
+        let (drawable, viewport_size) = self
             .drawable_provider
             .as_ref()
-            .and_then(DrawableProvider::take_blocking)
+            .and_then(|provider| {
+                take_drawable_matching_viewport(
+                    || provider.take_blocking(),
+                    |drawable| (drawable.texture().width(), drawable.texture().height()),
+                    || {
+                        let viewport_size = layer.drawable_size();
+                        size(
+                            (viewport_size.width.ceil() as i32).into(),
+                            (viewport_size.height.ceil() as i32).into(),
+                        )
+                    },
+                )
+            })
             .ok_or_else(|| anyhow::anyhow!("Failed to get drawable for render_to_image"))?;
 
         let command_buffer = self.render_frame(scene, drawable.texture(), viewport_size)?;
@@ -1941,6 +1988,29 @@ mod tests {
     use super::*;
     use gpui::{ClipNode, PaintSurface, PaintSurfaceSource, Scene, ScaledPixels, bounds, point};
     use std::sync::Arc;
+
+    #[test]
+    fn transaction_draws_wait_for_a_drawable() {
+        assert_eq!(drawable_acquisition(true), DrawableAcquisition::Blocking);
+        assert_eq!(
+            drawable_acquisition(false),
+            DrawableAcquisition::NonBlocking
+        );
+    }
+
+    #[test]
+    fn screenshot_acquisition_retries_stale_drawables() {
+        let mut drawables = [(80, 60), (120, 90)].into_iter();
+        let (drawable, viewport_size) = take_drawable_matching_viewport(
+            || drawables.next(),
+            |drawable| *drawable,
+            || size(DevicePixels(120), DevicePixels(90)),
+        )
+        .expect("the current-sized drawable should be selected");
+
+        assert_eq!(drawable, (120, 90));
+        assert_eq!(viewport_size, size(DevicePixels(120), DevicePixels(90)));
+    }
 
     fn wgpu_device() -> (wgpu::Device, wgpu::Queue) {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
