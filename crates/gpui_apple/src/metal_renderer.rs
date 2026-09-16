@@ -263,11 +263,7 @@ impl DrawableProvider {
         }
     }
 
-    fn request(&self, wake_when_ready: bool) {
-        if wake_when_ready {
-            self.wake_on_ready.store(true, Ordering::Release);
-        }
-
+    fn request(&self) {
         let should_send = {
             let (state, _) = &*self.state;
             let mut state = state.lock();
@@ -289,11 +285,15 @@ impl DrawableProvider {
     }
 
     fn take_ready(&self) -> Option<metal::MetalDrawable> {
+        // Arm the wake before checking `ready`: otherwise the worker can publish between the
+        // empty check and the wake request, leaving a ready drawable with nobody scheduled to
+        // consume it.
+        self.wake_on_ready.store(true, Ordering::Release);
         let drawable = self.take_now();
         if drawable.is_some() {
             return drawable;
         }
-        self.request(true);
+        self.request();
         None
     }
 
@@ -312,7 +312,7 @@ impl DrawableProvider {
         if let Some(drawable) = self.take_now() {
             return Some(drawable);
         }
-        self.request(false);
+        self.request();
         let (state, ready) = &*self.state;
         let mut state = state.lock();
         while state.ready.is_none() && state.acquisition_pending && state.worker_alive {
@@ -326,7 +326,7 @@ impl DrawableProvider {
     }
 
     fn prefetch(&self) {
-        self.request(false);
+        self.request();
     }
 }
 
