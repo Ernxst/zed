@@ -7,10 +7,10 @@ use cocoa::{
     quartzcore::AutoresizingMask,
 };
 use gpui::{
-    AtlasTextureId, Background, Bounds, ClipNode, DevicePixels, PaintSurface, Path, Point,
-    PaintSurfaceSource, PrimitiveBatch, ScaledPixels, Scene, Size, point, size,
+    AtlasTextureId, Background, Bounds, ClipNode, DevicePixels, PaintSurface, PaintSurfaceSource,
+    Path, Point, PrimitiveBatch, ScaledPixels, Scene, Size, point, size,
 };
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 use image::RgbaImage;
 
 use core_foundation::base::TCFType;
@@ -137,7 +137,7 @@ pub struct MetalRenderer {
     path_sample_count: u32,
     /// Offscreen render target reused across `render_scene` calls when
     /// rendering headlessly without reading pixels back.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
     headless_render_target: Option<metal::Texture>,
 }
 
@@ -222,7 +222,7 @@ impl MetalRenderer {
     ///
     /// This renderer can render scenes to images without requiring a CAMetalLayer,
     /// window, or AppKit. Use `render_scene_to_image()` to render scenes.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
     pub fn new_headless(instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>) -> Self {
         let device = Self::create_device();
         Self::new_internal(device, None, true, instance_buffer_pool)
@@ -403,7 +403,7 @@ impl MetalRenderer {
             path_intermediate_texture: None,
             path_intermediate_msaa_texture: None,
             path_sample_count: PATH_SAMPLE_COUNT,
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
             headless_render_target: None,
         }
     }
@@ -616,7 +616,7 @@ impl MetalRenderer {
     ///
     /// This is the primary method for headless rendering. It creates an offscreen
     /// texture, renders the scene to it, and returns the pixel data as an RGBA image.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
     pub fn render_scene_to_image(
         &mut self,
         scene: &Scene,
@@ -626,35 +626,40 @@ impl MetalRenderer {
             anyhow::bail!("Invalid size for render_scene_to_image: {:?}", size);
         }
 
-        // Update path intermediate textures for this size
-        self.update_path_intermediate_textures(size);
+        // Headless callers do not have a Cocoa event-loop pool to release
+        // autoreleased command buffers and render-pass descriptors.
+        objc2::rc::autoreleasepool(|_| {
+            // Update path intermediate textures for this size
+            self.update_path_intermediate_textures(size);
 
-        // Create an offscreen texture as render target
-        let texture_descriptor = metal::TextureDescriptor::new();
-        texture_descriptor.set_width(size.width.0 as u64);
-        texture_descriptor.set_height(size.height.0 as u64);
-        texture_descriptor.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-        texture_descriptor
-            .set_usage(metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead);
-        texture_descriptor.set_storage_mode(metal::MTLStorageMode::Managed);
-        let target_texture = self.device.new_texture(&texture_descriptor);
+            // Create an offscreen texture as render target
+            let texture_descriptor = metal::TextureDescriptor::new();
+            texture_descriptor.set_width(size.width.0 as u64);
+            texture_descriptor.set_height(size.height.0 as u64);
+            texture_descriptor.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+            texture_descriptor.set_usage(
+                metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead,
+            );
+            texture_descriptor.set_storage_mode(metal::MTLStorageMode::Managed);
+            let target_texture = self.device.new_texture(&texture_descriptor);
 
-        let command_buffer = self.render_frame(scene, &target_texture, size)?;
+            let command_buffer = self.render_frame(scene, &target_texture, size)?;
 
-        // On discrete GPUs (non-unified memory), Managed textures require an
-        // explicit blit synchronize before the CPU can read back the rendered
-        // data. Without this, get_bytes returns stale zeros.
-        if !self.is_unified_memory {
-            let blit = command_buffer.new_blit_command_encoder();
-            blit.synchronize_resource(&target_texture);
-            blit.end_encoding();
-        }
+            // On discrete GPUs (non-unified memory), Managed textures require an
+            // explicit blit synchronize before the CPU can read back the rendered
+            // data. Without this, get_bytes returns stale zeros.
+            if !self.is_unified_memory {
+                let blit = command_buffer.new_blit_command_encoder();
+                blit.synchronize_resource(&target_texture);
+                blit.end_encoding();
+            }
 
-        // Commit and wait for completion
-        command_buffer.commit();
-        command_buffer.wait_until_completed();
+            // Commit and wait for completion
+            command_buffer.commit();
+            command_buffer.wait_until_completed();
 
-        read_texture_to_image(&target_texture)
+            read_texture_to_image(&target_texture)
+        })
     }
 
     /// Renders a scene to a reused offscreen texture without reading pixels
@@ -664,39 +669,41 @@ impl MetalRenderer {
     /// encoding, instance buffer writes, command submission) and is used by
     /// headless benchmark rendering, where the produced pixels are never
     /// inspected.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
     pub fn render_scene(&mut self, scene: &Scene, size: Size<DevicePixels>) -> Result<()> {
         if size.width.0 <= 0 || size.height.0 <= 0 {
             anyhow::bail!("Invalid size for render_scene: {:?}", size);
         }
 
-        self.update_path_intermediate_textures(size);
+        objc2::rc::autoreleasepool(|_| {
+            self.update_path_intermediate_textures(size);
 
-        let needs_new_target = self.headless_render_target.as_ref().is_none_or(|texture| {
-            texture.width() != size.width.0 as u64 || texture.height() != size.height.0 as u64
-        });
-        if needs_new_target {
-            let texture_descriptor = metal::TextureDescriptor::new();
-            texture_descriptor.set_width(size.width.0 as u64);
-            texture_descriptor.set_height(size.height.0 as u64);
-            texture_descriptor.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-            texture_descriptor.set_usage(
-                metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead,
-            );
-            texture_descriptor.set_storage_mode(metal::MTLStorageMode::Private);
-            self.headless_render_target = Some(self.device.new_texture(&texture_descriptor));
-        }
-        let target_texture = self
-            .headless_render_target
-            .clone()
-            .expect("just ensured the render target exists");
+            let needs_new_target = self.headless_render_target.as_ref().is_none_or(|texture| {
+                texture.width() != size.width.0 as u64 || texture.height() != size.height.0 as u64
+            });
+            if needs_new_target {
+                let texture_descriptor = metal::TextureDescriptor::new();
+                texture_descriptor.set_width(size.width.0 as u64);
+                texture_descriptor.set_height(size.height.0 as u64);
+                texture_descriptor.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+                texture_descriptor.set_usage(
+                    metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead,
+                );
+                texture_descriptor.set_storage_mode(metal::MTLStorageMode::Private);
+                self.headless_render_target = Some(self.device.new_texture(&texture_descriptor));
+            }
+            let target_texture = self
+                .headless_render_target
+                .clone()
+                .expect("just ensured the render target exists");
 
-        let command_buffer = self.render_frame(scene, &target_texture, size)?;
+            let command_buffer = self.render_frame(scene, &target_texture, size)?;
 
-        // Commit without waiting, mirroring presentation to a real window where
-        // the CPU doesn't block on the GPU.
-        command_buffer.commit();
-        Ok(())
+            // Commit without waiting, mirroring presentation to a real window where
+            // the CPU doesn't block on the GPU.
+            command_buffer.commit();
+            Ok(())
+        })
     }
 
     fn draw_primitives_to_texture(
@@ -1269,14 +1276,21 @@ impl MetalRenderer {
                         mem::size_of_val(&texture_size) as u64,
                         &texture_size as *const Size<DevicePixels> as *const _,
                     );
-                    command_encoder.set_fragment_texture(SurfaceInputIndex::YTexture as u64, unsafe {
-                        let texture = CVMetalTextureGetTexture(y_texture.as_concrete_TypeRef());
-                        Some(metal::TextureRef::from_ptr(texture as *mut _))
-                    });
-                    command_encoder.set_fragment_texture(SurfaceInputIndex::CbCrTexture as u64, unsafe {
-                        let texture = CVMetalTextureGetTexture(cb_cr_texture.as_concrete_TypeRef());
-                        Some(metal::TextureRef::from_ptr(texture as *mut _))
-                    });
+                    command_encoder.set_fragment_texture(
+                        SurfaceInputIndex::YTexture as u64,
+                        unsafe {
+                            let texture = CVMetalTextureGetTexture(y_texture.as_concrete_TypeRef());
+                            Some(metal::TextureRef::from_ptr(texture as *mut _))
+                        },
+                    );
+                    command_encoder.set_fragment_texture(
+                        SurfaceInputIndex::CbCrTexture as u64,
+                        unsafe {
+                            let texture =
+                                CVMetalTextureGetTexture(cb_cr_texture.as_concrete_TypeRef());
+                            Some(metal::TextureRef::from_ptr(texture as *mut _))
+                        },
+                    );
                 }
                 PaintSurfaceSource::Texture {
                     texture,
@@ -1342,7 +1356,7 @@ fn new_command_encoder_for_texture<'a>(
     command_encoder
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 fn read_texture_to_image(texture: &metal::TextureRef) -> Result<RgbaImage> {
     let width = texture.width() as u32;
     let height = texture.height() as u32;
@@ -1723,12 +1737,12 @@ pub struct SurfaceBounds {
     pub pad: u32,
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 pub struct MetalHeadlessRenderer {
     renderer: MetalRenderer,
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 impl MetalHeadlessRenderer {
     pub fn new() -> Self {
         let instance_buffer_pool = Arc::new(Mutex::new(InstanceBufferPool::default()));
@@ -1737,7 +1751,7 @@ impl MetalHeadlessRenderer {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 impl gpui::PlatformHeadlessRenderer for MetalHeadlessRenderer {
     fn render_scene_to_image(
         &mut self,
@@ -1759,7 +1773,7 @@ impl gpui::PlatformHeadlessRenderer for MetalHeadlessRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{ClipNode, PaintSurface, PaintSurfaceSource, Scene, ScaledPixels, bounds, point};
+    use gpui::{ClipNode, PaintSurface, PaintSurfaceSource, ScaledPixels, Scene, bounds, point};
     use std::sync::Arc;
 
     fn wgpu_device() -> (wgpu::Device, wgpu::Queue) {
@@ -1832,10 +1846,9 @@ mod tests {
         let metal_texture = retained_metal_texture(&texture);
         let source = MetalTextureSurface::new(metal_texture, 1, texture.clone());
         let event = source.ready_event.clone();
-        let gpui::SurfaceSource::Texture { texture, .. } = source.surface_source(size(
-            DevicePixels(32),
-            DevicePixels(32),
-        )) else {
+        let gpui::SurfaceSource::Texture { texture, .. } =
+            source.surface_source(size(DevicePixels(32), DevicePixels(32)))
+        else {
             unreachable!();
         };
 
@@ -1859,7 +1872,11 @@ mod tests {
 
         let blue_texture = Arc::new(device.create_texture(&wgpu::TextureDescriptor {
             label: Some("second native WebGPU presentation proof"),
-            size: wgpu::Extent3d { width: 32, height: 32, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 32,
+                height: 32,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -1876,7 +1893,10 @@ mod tests {
                     view: &view,
                     resolve_target: None,
                     depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLUE), store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLUE),
+                        store: wgpu::StoreOp::Store,
+                    },
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
@@ -1885,11 +1905,14 @@ mod tests {
             });
         }
         queue.submit([producer.finish()]);
-        let blue_source = MetalTextureSurface::new(retained_metal_texture(&blue_texture), 1, blue_texture);
+        let blue_source =
+            MetalTextureSurface::new(retained_metal_texture(&blue_texture), 1, blue_texture);
         let blue_event = blue_source.ready_event.clone();
-        let gpui::SurfaceSource::Texture { texture, .. } = blue_source.surface_source(size(
-            DevicePixels(32), DevicePixels(32),
-        )) else { unreachable!() };
+        let gpui::SurfaceSource::Texture { texture, .. } =
+            blue_source.surface_source(size(DevicePixels(32), DevicePixels(32)))
+        else {
+            unreachable!()
+        };
         let blue_clip = scene.insert_clip(ClipNode {
             folded_bounds: scene_bounds(48., 48.),
             rounded_bounds: Default::default(),
@@ -1904,10 +1927,14 @@ mod tests {
                 size(ScaledPixels(32.), ScaledPixels(32.)),
             ),
             clip_id: blue_clip,
-            source: PaintSurfaceSource::Texture { texture, texture_size: size(DevicePixels(32), DevicePixels(32)) },
+            source: PaintSurfaceSource::Texture {
+                texture,
+                texture_size: size(DevicePixels(32), DevicePixels(32)),
+            },
         });
 
-        let mut renderer = MetalRenderer::new_headless(Arc::new(Mutex::new(InstanceBufferPool::default())));
+        let mut renderer =
+            MetalRenderer::new_headless(Arc::new(Mutex::new(InstanceBufferPool::default())));
         let descriptor = metal::TextureDescriptor::new();
         descriptor.set_width(64);
         descriptor.set_height(64);

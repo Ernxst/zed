@@ -2032,8 +2032,8 @@ mod tests {
 
     #[test]
     fn grid_templates_lower_auto_repeat() {
-        use taffy::style_helpers::{length, minmax, repeat};
         use taffy::style::RepetitionCount;
+        use taffy::style_helpers::{length, minmax, repeat};
 
         let style = Style {
             grid_cols: Some(GridTemplate {

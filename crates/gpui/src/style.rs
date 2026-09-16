@@ -885,10 +885,8 @@ impl Style {
                 bounds.origin.y + border_widths.top,
             ),
             size: size(
-                (bounds.size.width - border_widths.left - border_widths.right)
-                    .max(Pixels::ZERO),
-                (bounds.size.height - border_widths.top - border_widths.bottom)
-                    .max(Pixels::ZERO),
+                (bounds.size.width - border_widths.left - border_widths.right).max(Pixels::ZERO),
+                (bounds.size.height - border_widths.top - border_widths.bottom).max(Pixels::ZERO),
             ),
         };
         // The padding box's corner radius: the outer radius minus the larger

@@ -8,8 +8,8 @@
 //! If all of your elements are the same height, see [`crate::UniformList`] for a simpler API
 
 use crate::{
-    AnyElement, App, AvailableSpace, Bounds, ContentMask, DispatchPhase, Edges, Element, EntityId,
-    ElementId, FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
+    AnyElement, App, AvailableSpace, Bounds, ContentMask, DispatchPhase, Edges, Element, ElementId,
+    EntityId, FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
     InteractiveElement, Interactivity, IntoElement, Overflow, Pixels, Point, ScrollWheelEvent,
     Size, Style, StyleRefinement, Styled, Visibility, Window, point, px, size,
 };
@@ -932,9 +932,7 @@ impl StateInner {
         let scroll_max =
             (self.items.summary().height + padding.top + padding.bottom - height).max(px(0.));
         let previous_scroll_top = self.scroll_top(scroll_top);
-        let new_scroll_top = (previous_scroll_top - delta.y)
-            .max(px(0.))
-            .min(scroll_max);
+        let new_scroll_top = (previous_scroll_top - delta.y).max(px(0.)).min(scroll_max);
         let did_scroll = new_scroll_top != previous_scroll_top;
         let was_following = self.follow_state.is_following();
         if delta.y > px(0.) {
@@ -2054,8 +2052,8 @@ mod test {
     fn nested_scroll_list_consumes_range_and_routes_residual_to_parent(cx: &mut TestAppContext) {
         let cx = cx.add_empty_window();
         let parent = ScrollHandle::new();
-        let state = ListState::new(20, crate::ListAlignment::Top, px(0.))
-            .with_uniform_item_height(px(20.));
+        let state =
+            ListState::new(20, crate::ListAlignment::Top, px(0.)).with_uniform_item_height(px(20.));
 
         cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, cx| {
             cx.new(|_| NestedListScrollTestView {

@@ -1196,12 +1196,11 @@ mod tests {
 
     #[test]
     fn test_background_repeating_hatch_135_positioning_area() {
-        let background = repeating_hatch_135(rgba(0xff0000ff), 4.0, 12.0).positioning_area(
-            crate::Bounds {
+        let background =
+            repeating_hatch_135(rgba(0xff0000ff), 4.0, 12.0).positioning_area(crate::Bounds {
                 origin: crate::point(crate::px(13.0), crate::px(17.0)),
                 size: crate::size(crate::px(113.0), crate::px(79.0)),
-            },
-        );
+            });
         assert_eq!(background.pattern_tile_origin_x, 13.0);
         assert_eq!(background.pattern_tile_origin_y, 17.0);
         assert_eq!(background.pattern_tile_width, 113.0);

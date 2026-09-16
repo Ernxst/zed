@@ -8,8 +8,8 @@ use derive_more::{Add, AddAssign, Div, DivAssign, Mul, Neg, Sub, SubAssign};
 use refineable::Refineable;
 use schemars::{JsonSchema, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
-use std::{borrow::Cow, sync::Arc};
 use std::ops::{AddAssign, Range};
+use std::{borrow::Cow, sync::Arc};
 use std::{
     cmp::{self, PartialOrd},
     fmt::{self, Display},
@@ -2239,12 +2239,21 @@ impl Anchor {
         }
     }
 
-    /// Returns true if at the center.
+    /// Returns whether the anchor is center-positioned.
     #[inline]
     pub fn is_center(&self) -> bool {
         matches!(
             self,
             Self::TopCenter | Self::BottomCenter | Self::LeftCenter | Self::RightCenter
+        )
+    }
+
+    /// Returns whether the anchor is bottom-positioned.
+    #[inline]
+    pub fn is_bottom(&self) -> bool {
+        matches!(
+            self,
+            Self::BottomCenter | Self::BottomLeft | Self::BottomRight
         )
     }
 }
