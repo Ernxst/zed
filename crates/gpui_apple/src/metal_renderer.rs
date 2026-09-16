@@ -2,7 +2,7 @@ use crate::metal_atlas::MetalAtlas;
 use anyhow::{Context as _, Result};
 use block::ConcreteBlock;
 use cocoa::{
-    base::{NO, YES},
+    base::YES,
     foundation::{NSSize, NSUInteger},
     quartzcore::AutoresizingMask,
 };
@@ -23,9 +23,15 @@ use metal::{
     CAMetalLayer, CommandQueue, MTLGPUFamily, MTLPixelFormat, MTLResourceOptions, NSRange,
 };
 use objc::{self, msg_send, sel, sel_impl};
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 
 use std::{cell::Cell, ffi::c_void, mem, mem::MaybeUninit, ops::Range, ptr, slice, sync::Arc};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc::{self, Sender},
+};
+use std::thread;
+use std::time::Duration;
 
 // Exported to metal
 pub(crate) type PointF = gpui::Point<f32>;
@@ -43,6 +49,13 @@ const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
 
 pub type Context = Arc<Mutex<InstanceBufferPool>>;
 pub type Renderer = MetalRenderer;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DrawResult {
+    Submitted,
+    DrawablePending,
+    Failed,
+}
 
 pub unsafe fn new_renderer(
     context: self::Context,
@@ -112,6 +125,7 @@ impl InstanceBufferPool {
 pub struct MetalRenderer {
     device: metal::Device,
     layer: Option<metal::MetalLayer>,
+    drawable_provider: Option<DrawableProvider>,
     is_apple_gpu: bool,
     is_unified_memory: bool,
     presents_with_transaction: bool,
@@ -139,6 +153,145 @@ pub struct MetalRenderer {
     /// rendering headlessly without reading pixels back.
     #[cfg(any(test, feature = "test-support"))]
     headless_render_target: Option<metal::Texture>,
+}
+
+struct DrawableProvider {
+    request_tx: Sender<()>,
+    state: Arc<(Mutex<DrawableState>, Condvar)>,
+    wake_on_ready: Arc<AtomicBool>,
+    ready_handler: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
+}
+
+struct DrawableState {
+    ready: Option<metal::MetalDrawable>,
+    acquisition_pending: bool,
+    worker_alive: bool,
+}
+
+impl DrawableProvider {
+    fn new(layer: metal::MetalLayer) -> Self {
+        const PREFETCH_TTL: Duration = Duration::from_millis(50);
+
+        let (request_tx, request_rx) = mpsc::channel();
+        let state = Arc::new((
+            Mutex::new(DrawableState {
+                ready: None,
+                acquisition_pending: false,
+                worker_alive: true,
+            }),
+            Condvar::new(),
+        ));
+        let worker_state = state.clone();
+        let wake_on_ready = Arc::new(AtomicBool::new(false));
+        let worker_wake_on_ready = wake_on_ready.clone();
+        let ready_handler = Arc::new(Mutex::new(None::<Arc<dyn Fn() + Send + Sync>>));
+        let worker_ready_handler = ready_handler.clone();
+
+        thread::Builder::new()
+            .name("gpui-metal-drawable".into())
+            .spawn(move || {
+                'worker: while request_rx.recv().is_ok() {
+                    loop {
+                        let drawable = objc::rc::autoreleasepool(|| {
+                            layer.next_drawable().map(ToOwned::to_owned)
+                        });
+                        {
+                            let (state, ready) = &*worker_state;
+                            let mut state = state.lock();
+                            state.acquisition_pending = false;
+                            state.ready = drawable;
+                            ready.notify_all();
+                        }
+                        if worker_wake_on_ready.swap(false, Ordering::AcqRel) {
+                            let handler = worker_ready_handler.lock().clone();
+                            if let Some(handler) = handler {
+                                handler();
+                            }
+                        }
+
+                        match request_rx.recv_timeout(PREFETCH_TTL) {
+                            Ok(()) => continue,
+                            Err(mpsc::RecvTimeoutError::Timeout) => {
+                                let (state, _) = &*worker_state;
+                                state.lock().ready.take();
+                                break;
+                            }
+                            Err(mpsc::RecvTimeoutError::Disconnected) => break 'worker,
+                        }
+                    }
+                }
+                let (state, ready) = &*worker_state;
+                state.lock().worker_alive = false;
+                ready.notify_all();
+            })
+            .expect("failed to start Metal drawable acquisition thread");
+
+        Self {
+            request_tx,
+            state,
+            wake_on_ready,
+            ready_handler,
+        }
+    }
+
+    fn request(&self, wake_when_ready: bool) {
+        if wake_when_ready {
+            self.wake_on_ready.store(true, Ordering::Release);
+        }
+
+        let should_send = {
+            let (state, _) = &*self.state;
+            let mut state = state.lock();
+            if state.ready.is_some() || state.acquisition_pending || !state.worker_alive {
+                false
+            } else {
+                state.acquisition_pending = true;
+                true
+            }
+        };
+        if should_send && self.request_tx.send(()).is_err() {
+            let (state, ready) = &*self.state;
+            let mut state = state.lock();
+            state.acquisition_pending = false;
+            state.worker_alive = false;
+            ready.notify_all();
+            log::error!("Metal drawable acquisition thread is unavailable");
+        }
+    }
+
+    fn take_ready(&self) -> Option<metal::MetalDrawable> {
+        let drawable = {
+            let (state, _) = &*self.state;
+            state.lock().ready.take()
+        };
+        if drawable.is_some() {
+            self.wake_on_ready.store(false, Ordering::Release);
+            return drawable;
+        }
+        self.request(true);
+        None
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn take_blocking(&self) -> Option<metal::MetalDrawable> {
+        if let Some(drawable) = self.take_ready() {
+            return Some(drawable);
+        }
+        let (state, ready) = &*self.state;
+        let mut state = state.lock();
+        while state.ready.is_none() && state.acquisition_pending && state.worker_alive {
+            ready.wait(&mut state);
+        }
+        state.ready.take()
+    }
+
+    fn set_ready_handler(&self, handler: Arc<dyn Fn() + Send + Sync>) {
+        *self.ready_handler.lock() = Some(handler);
+    }
+
+    fn prefetch(&self) {
+        self.request(false);
+    }
 }
 
 /// A retained RGBA Metal texture presented through GPUI's surface scene path.
@@ -206,7 +359,9 @@ impl MetalRenderer {
         #[cfg(any(test, feature = "test-support"))]
         layer.set_framebuffer_only(false);
         unsafe {
-            let _: () = msg_send![&*layer, setAllowsNextDrawableTimeout: NO];
+            // Acquisition runs off the main thread, but a finite timeout ensures window teardown
+            // cannot strand the worker indefinitely.
+            let _: () = msg_send![&*layer, setAllowsNextDrawableTimeout: YES];
             let _: () = msg_send![&*layer, setNeedsDisplayOnBoundsChange: YES];
             let _: () = msg_send![
                 &*layer,
@@ -379,9 +534,12 @@ impl MetalRenderer {
         let core_video_texture_cache =
             CVMetalTextureCache::new(None, device.clone(), None).unwrap();
 
+        let drawable_provider = layer.as_ref().cloned().map(DrawableProvider::new);
+
         Self {
             device,
             layer,
+            drawable_provider,
             presents_with_transaction: false,
             is_apple_gpu,
             is_unified_memory,
@@ -427,6 +585,12 @@ impl MetalRenderer {
         self.presents_with_transaction = presents_with_transaction;
         if let Some(layer) = &self.layer {
             layer.set_presents_with_transaction(presents_with_transaction);
+        }
+    }
+
+    pub fn set_drawable_ready_handler(&mut self, handler: Arc<dyn Fn() + Send + Sync>) {
+        if let Some(provider) = &self.drawable_provider {
+            provider.set_ready_handler(handler);
         }
     }
 
@@ -495,36 +659,49 @@ impl MetalRenderer {
         // nothing to do
     }
 
-    pub fn draw(&mut self, scene: &Scene) {
+    pub fn draw(&mut self, scene: &Scene) -> DrawResult {
         let layer = match &self.layer {
             Some(l) => l.clone(),
             None => {
                 log::error!(
                     "draw() called on headless renderer - use render_scene_to_image() instead"
                 );
-                return;
+                return DrawResult::Failed;
             }
         };
-        let viewport_size = layer.drawable_size();
-        let viewport_size: Size<DevicePixels> = size(
-            (viewport_size.width.ceil() as i32).into(),
-            (viewport_size.height.ceil() as i32).into(),
-        );
-        let drawable = if let Some(drawable) = layer.next_drawable() {
-            drawable
-        } else {
-            log::error!(
-                "failed to retrieve next drawable, drawable size: {:?}",
-                viewport_size
-            );
-            return;
+        let Some(drawable) = self
+            .drawable_provider
+            .as_ref()
+            .and_then(DrawableProvider::take_ready)
+        else {
+            return DrawResult::DrawablePending;
         };
+        let drawable_size = layer.drawable_size();
+        let viewport_size: Size<DevicePixels> = size(
+            (drawable_size.width.ceil() as i32).into(),
+            (drawable_size.height.ceil() as i32).into(),
+        );
+        if drawable.texture().width() != viewport_size.width.0 as u64
+            || drawable.texture().height() != viewport_size.height.0 as u64
+        {
+            // A resize can complete while acquisition waits. Release the stale drawable and ask
+            // for one matching the layer's current dimensions.
+            if let Some(provider) = &self.drawable_provider {
+                provider.request(true);
+            }
+            return DrawResult::DrawablePending;
+        }
+        // Keep acquisition one frame ahead while frames are flowing. Starting before command
+        // encoding leaves another pool slot available and avoids racing the next display-link tick.
+        if let Some(provider) = &self.drawable_provider {
+            provider.prefetch();
+        }
 
         let command_buffer = match self.render_frame(scene, drawable.texture(), viewport_size) {
             Ok(command_buffer) => command_buffer,
             Err(error) => {
                 log::error!("failed to render: {error:#}");
-                return;
+                return DrawResult::Failed;
             }
         };
 
@@ -533,9 +710,10 @@ impl MetalRenderer {
             command_buffer.wait_until_scheduled();
             drawable.present();
         } else {
-            command_buffer.present_drawable(drawable);
+            command_buffer.present_drawable(&drawable);
             command_buffer.commit();
         }
+        DrawResult::Submitted
     }
 
     fn render_frame(
@@ -599,8 +777,10 @@ impl MetalRenderer {
             (viewport_size.width.ceil() as i32).into(),
             (viewport_size.height.ceil() as i32).into(),
         );
-        let drawable = layer
-            .next_drawable()
+        let drawable = self
+            .drawable_provider
+            .as_ref()
+            .and_then(DrawableProvider::take_blocking)
             .ok_or_else(|| anyhow::anyhow!("Failed to get drawable for render_to_image"))?;
 
         let command_buffer = self.render_frame(scene, drawable.texture(), viewport_size)?;

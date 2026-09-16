@@ -419,6 +419,25 @@ impl WindowFrameSource {
         Ok(())
     }
 
+    /// Returns a thread-safe callback that requests a frame through the same coalesced path as the
+    /// display link. This is used when a presentation resource becomes ready between refreshes.
+    pub fn requester(&self) -> Arc<dyn Fn() + Send + Sync> {
+        let frame_requests = self.frame_requests.clone();
+        let observer = self.observer.clone();
+        Arc::new(move || {
+            let Some(frame_request) = frame_requests.claim() else {
+                return;
+            };
+            if let Some(observer) = &observer {
+                if catch_unwind(AssertUnwindSafe(|| observer(frame_request))).is_err() {
+                    log::error!("embedded drawable-ready frame observer panicked");
+                }
+            } else {
+                frame_request.dispatch();
+            }
+        })
+    }
+
     pub fn stop(&mut self) {
         self.frame_requests.invalidate();
         if let Some((display_id, subscriber_id)) = self.registration.take() {
