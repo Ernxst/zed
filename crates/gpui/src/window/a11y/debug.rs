@@ -283,6 +283,15 @@ fn node_to_json(
     if let Some(v) = node.orientation() {
         aria.insert("orientation".into(), json!(format!("{v:?}")));
     }
+    if node.is_read_only() {
+        aria.insert("read_only".into(), json!(true));
+    }
+    if node.is_required() {
+        aria.insert("required".into(), json!(true));
+    }
+    if let Some(v) = node.invalid() {
+        aria.insert("invalid".into(), json!(format!("{v:?}")));
+    }
 
     // Numeric properties.
     if let Some(v) = node.numeric_value() {

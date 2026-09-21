@@ -1464,6 +1464,24 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Set whether this element is operable but not editable.
+    fn aria_read_only(mut self, read_only: bool) -> Self {
+        self.interactivity().aria.read_only = Some(read_only);
+        self
+    }
+
+    /// Set whether user input is required on this element.
+    fn aria_required(mut self, required: bool) -> Self {
+        self.interactivity().aria.required = Some(required);
+        self
+    }
+
+    /// Set the input-validity state for this element.
+    fn aria_invalid(mut self, invalid: accesskit::Invalid) -> Self {
+        self.interactivity().aria.invalid = Some(invalid);
+        self
+    }
+
     /// Set the heading level of this element.
     fn aria_level(mut self, level: usize) -> Self {
         self.interactivity().aria.level = Some(level);
@@ -2100,6 +2118,9 @@ pub(crate) struct AriaProperties {
     pub(crate) value: Option<SharedString>,
     pub(crate) placeholder: Option<SharedString>,
     pub(crate) orientation: Option<accesskit::Orientation>,
+    pub(crate) read_only: Option<bool>,
+    pub(crate) required: Option<bool>,
+    pub(crate) invalid: Option<accesskit::Invalid>,
     pub(crate) level: Option<usize>,
     pub(crate) position_in_set: Option<usize>,
     pub(crate) size_of_set: Option<usize>,
@@ -3626,6 +3647,23 @@ impl Interactivity {
         }
         if let Some(orientation) = self.aria.orientation {
             node.set_orientation(orientation);
+        }
+        if let Some(read_only) = self.aria.read_only {
+            if read_only {
+                node.set_read_only();
+            } else {
+                node.clear_read_only();
+            }
+        }
+        if let Some(required) = self.aria.required {
+            if required {
+                node.set_required();
+            } else {
+                node.clear_required();
+            }
+        }
+        if let Some(invalid) = self.aria.invalid {
+            node.set_invalid(invalid);
         }
         if let Some(level) = self.aria.level {
             node.set_level(level);
@@ -5885,6 +5923,33 @@ mod tests {
 
         assert_eq!(node.live(), Some(accesskit::Live::Assertive));
         assert!(!node.is_live_atomic());
+    }
+
+    #[test]
+    fn test_aria_form_state_builders_write_and_clear_accesskit_properties() {
+        let mut element = div()
+            .id("field")
+            .aria_orientation(accesskit::Orientation::Horizontal)
+            .aria_read_only(true)
+            .aria_required(true)
+            .aria_invalid(accesskit::Invalid::Grammar);
+        let mut node = accesskit::Node::new(accesskit::Role::TextInput);
+
+        element.interactivity().write_a11y_info(&mut node);
+
+        assert_eq!(node.orientation(), Some(accesskit::Orientation::Horizontal));
+        assert!(node.is_read_only());
+        assert!(node.is_required());
+        assert_eq!(node.invalid(), Some(accesskit::Invalid::Grammar));
+
+        let mut element = div()
+            .id("field")
+            .aria_read_only(false)
+            .aria_required(false);
+        element.interactivity().write_a11y_info(&mut node);
+
+        assert!(!node.is_read_only());
+        assert!(!node.is_required());
     }
 
     /// Two focusable, clickable elements ("a" and "b") used to exercise the
