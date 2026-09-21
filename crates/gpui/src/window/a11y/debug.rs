@@ -274,6 +274,9 @@ fn node_to_json(
     if let Some(v) = node.is_expanded() {
         aria.insert("expanded".into(), json!(v));
     }
+    if let Some(v) = node.has_popup() {
+        aria.insert("has_popup".into(), json!(format!("{v:?}")));
+    }
     if let Some(v) = node.toggled() {
         aria.insert("toggled".into(), json!(format!("{v:?}")));
     }

@@ -1325,6 +1325,19 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Set a human-readable, localized description of this element's role,
+    /// announced in place of the role's own name (`aria-roledescription`).
+    fn aria_role_description(mut self, role_description: impl Into<SharedString>) -> Self {
+        self.interactivity().aria.role_description = Some(role_description.into());
+        self
+    }
+
+    /// Set the kind of popup this element opens (`aria-haspopup`).
+    fn aria_has_popup(mut self, has_popup: accesskit::HasPopup) -> Self {
+        self.interactivity().aria.has_popup = Some(has_popup);
+        self
+    }
+
     /// Set the keyboard shortcut(s) that activate this element, announced by
     /// assistive technology (maps to AccessKit's `keyboard_shortcut`).
     ///
@@ -2104,6 +2117,8 @@ pub(crate) struct AriaProperties {
     pub(crate) label: Option<SharedString>,
     pub(crate) description: Option<SharedString>,
     pub(crate) keyshortcuts: Option<SharedString>,
+    pub(crate) role_description: Option<SharedString>,
+    pub(crate) has_popup: Option<accesskit::HasPopup>,
     pub(crate) selected: Option<bool>,
     pub(crate) current: Option<accesskit::AriaCurrent>,
     pub(crate) live: Option<accesskit::Live>,
@@ -3627,6 +3642,12 @@ impl Interactivity {
         }
         if let Some(keyshortcuts) = &self.aria.keyshortcuts {
             node.set_keyboard_shortcut(keyshortcuts.to_string());
+        }
+        if let Some(role_description) = &self.aria.role_description {
+            node.set_role_description(role_description.to_string());
+        }
+        if let Some(has_popup) = self.aria.has_popup {
+            node.set_has_popup(has_popup);
         }
         if let Some(selected) = self.aria.selected {
             node.set_selected(selected);
@@ -5953,6 +5974,20 @@ mod tests {
 
         assert_eq!(node.live(), Some(accesskit::Live::Assertive));
         assert!(!node.is_live_atomic());
+    }
+
+    #[test]
+    fn test_aria_popup_and_role_description_builders_write_accesskit_properties() {
+        let mut element = div()
+            .id("menu-trigger")
+            .aria_has_popup(accesskit::HasPopup::Menu)
+            .aria_role_description("Number field");
+        let mut node = accesskit::Node::new(accesskit::Role::Button);
+
+        element.interactivity().write_a11y_info(&mut node);
+
+        assert_eq!(node.has_popup(), Some(accesskit::HasPopup::Menu));
+        assert_eq!(node.role_description(), Some("Number field"));
     }
 
     #[test]
