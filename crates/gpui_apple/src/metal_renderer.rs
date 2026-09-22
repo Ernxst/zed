@@ -816,12 +816,22 @@ impl MetalRenderer {
             viewport_size,
         )?;
 
+        let texture_surfaces: Vec<Arc<MetalTextureSurface>> = scene
+            .surfaces
+            .iter()
+            .filter_map(|surface| match &surface.source {
+                PaintSurfaceSource::Texture { texture, .. } => texture.clone().downcast().ok(),
+                _ => None,
+            })
+            .collect();
+        let texture_surfaces = Cell::new(Some(texture_surfaces));
         let instance_buffer_pool = self.instance_buffer_pool.clone();
         let instance_buffer = Cell::new(Some(writer.finish()));
         let block = ConcreteBlock::new(move |_| {
             if let Some(instance_buffer) = instance_buffer.take() {
                 instance_buffer_pool.lock().release(instance_buffer);
             }
+            texture_surfaces.take();
         });
         let block = block.copy();
         command_buffer.add_completed_handler(&block);
