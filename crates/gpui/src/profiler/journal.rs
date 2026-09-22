@@ -530,9 +530,12 @@ pub(crate) fn foreground_runnable_counter() -> ForegroundRunnableCounter {
     FOREGROUND_RUNNABLES.with(Clone::clone)
 }
 
-/// Starts journaling on the calling thread. Called once by `App` construction
-/// on the main thread; every other thread's recording calls are no-ops.
-/// Idempotent so that multiple `App`s on one thread (tests) share one journal.
+/// Starts journaling on the calling thread, allocating its ring. Called
+/// lazily by `App::foreground_journal` the first time something on this
+/// thread attaches a reader (hang detection, bench context); every other
+/// thread's recording calls are no-ops, as are this thread's until this
+/// runs. Idempotent so that multiple `App`s on one thread (tests) share one
+/// journal.
 pub(crate) fn install_foreground_journal() -> ForegroundJournal {
     let foreground_runnables = foreground_runnable_counter();
     FOREGROUND_JOURNAL.with(|journal| {

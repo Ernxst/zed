@@ -678,6 +678,7 @@ struct MacWindowState {
     cursor_visible: Arc<AtomicBool>,
     frame_source: Option<WindowFrameSource>,
     renderer: renderer::Renderer,
+    presentation_pending: bool,
     request_frame_observer: Option<Arc<dyn Fn(crate::FrameRequest) + Send + Sync>>,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
@@ -867,6 +868,10 @@ impl MacWindowState {
             .get_or_insert_with(|| WindowFrameSource::new(data, step, observer))
             .start(display_id)
             .log_err();
+        if let Some(frame_source) = &self.frame_source {
+            self.renderer
+                .set_drawable_ready_handler(frame_source.requester());
+        }
     }
 
     fn stop_display_link(&mut self) {
@@ -1143,6 +1148,7 @@ impl MacWindow {
                     bounds.size.map(|pixels| pixels.as_f32()),
                     false,
                 ),
+                presentation_pending: false,
                 request_frame_observer,
                 request_frame_callback: None,
                 event_callback: None,
@@ -2058,7 +2064,14 @@ impl PlatformWindow for MacWindow {
 
     fn draw(&self, scene: &gpui::Scene) {
         let mut this = self.0.lock();
-        this.renderer.draw(scene);
+        this.presentation_pending = matches!(
+            this.renderer.draw(scene),
+            renderer::DrawResult::DrawablePending
+        );
+    }
+
+    fn presentation_pending(&self) -> bool {
+        self.0.lock().presentation_pending
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {

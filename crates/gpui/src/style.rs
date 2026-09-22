@@ -267,6 +267,8 @@ pub struct Style {
     /// How children overflowing their container should affect layout
     #[refineable]
     pub overflow: Point<Overflow>,
+    /// A paint-only clip applied to this element and its contents.
+    pub clip_path: Option<ClipPath>,
     /// How much space (in points) should be reserved for the scrollbars of `Overflow::Scroll` and `Overflow::Auto` nodes.
     pub scrollbar_width: AbsoluteLength,
     /// Whether both x and y axis should be scrollable at the same time.
@@ -423,6 +425,26 @@ pub struct Style {
     /// Whether to draw a red debugging outline around this element and all of its conforming children
     #[cfg(debug_assertions)]
     pub debug_below: bool,
+}
+
+/// A shape that clips an element and its contents without affecting layout.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub enum ClipPath {
+    /// A rectangle inset from the element's border box.
+    Inset(ClipPathInsets),
+}
+
+/// Insets for a rectangular clip path.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ClipPathInsets {
+    /// The top inset.
+    pub top: DefiniteLength,
+    /// The right inset.
+    pub right: DefiniteLength,
+    /// The bottom inset.
+    pub bottom: DefiniteLength,
+    /// The left inset.
+    pub left: DefiniteLength,
 }
 
 impl Styled for StyleRefinement {
@@ -823,6 +845,42 @@ impl Style {
         }
     }
 
+    /// Get the content mask for this element's clip path, based on the given bounds.
+    pub fn clip_path_mask(
+        &self,
+        bounds: Bounds<Pixels>,
+        rem_size: Pixels,
+    ) -> Option<ContentMask<Pixels>> {
+        let ClipPath::Inset(insets) = self.clip_path.as_ref()?;
+        let horizontal_basis = bounds.size.width.into();
+        let vertical_basis = bounds.size.height.into();
+        let mut top = insets.top.to_pixels(vertical_basis, rem_size);
+        let mut right = insets.right.to_pixels(horizontal_basis, rem_size);
+        let mut bottom = insets.bottom.to_pixels(vertical_basis, rem_size);
+        let mut left = insets.left.to_pixels(horizontal_basis, rem_size);
+        let normalize_pair = |start: &mut Pixels, end: &mut Pixels, size: Pixels| {
+            let sum = *start + *end;
+            if sum > size {
+                let scale = size / sum;
+                *start *= scale;
+                *end *= scale;
+            }
+        };
+        normalize_pair(&mut left, &mut right, bounds.size.width);
+        normalize_pair(&mut top, &mut bottom, bounds.size.height);
+        let min = point(bounds.origin.x + left, bounds.origin.y + top);
+        let bottom_right = bounds.bottom_right();
+        let max = point(
+            (bottom_right.x - right).max(min.x),
+            (bottom_right.y - bottom).max(min.y),
+        );
+
+        Some(ContentMask {
+            bounds: Bounds::from_corners(min, max),
+            corner_radii: Corners::default(),
+        })
+    }
+
     /// Paints the background of an element styled with this style.
     pub fn paint(
         &self,
@@ -1006,6 +1064,7 @@ impl Default for Style {
                 x: Overflow::Visible,
                 y: Overflow::Visible,
             },
+            clip_path: None,
             allow_concurrent_scroll: false,
             restrict_scroll_to_axis: false,
             scrollbar_width: AbsoluteLength::default(),
@@ -1640,6 +1699,41 @@ mod tests {
             Bounds::new(point(px(4.), px(4.)), size(px(92.), px(42.)))
         );
         assert_eq!(mask.corner_radii, Corners::all(px(6.)));
+    }
+
+    #[test]
+    fn inset_clip_path_resolves_percentages_against_each_axis() {
+        let mut style = Style::default();
+        style.clip_path = Some(ClipPath::Inset(ClipPathInsets {
+            top: DefiniteLength::Fraction(0.5),
+            right: DefiniteLength::Fraction(0.5),
+            bottom: DefiniteLength::Fraction(0.5),
+            left: DefiniteLength::Fraction(0.5),
+        }));
+        let bounds = Bounds::new(point(px(10.), px(20.)), size(px(100.), px(40.)));
+
+        let mask = style.clip_path_mask(bounds, px(16.)).unwrap();
+
+        assert_eq!(mask.bounds.origin, point(px(60.), px(40.)));
+        assert_eq!(mask.bounds.size, size(px(0.), px(0.)));
+        assert_eq!(mask.corner_radii, Corners::default());
+    }
+
+    #[test]
+    fn inset_clip_path_normalizes_over_constrained_sides_proportionally() {
+        let mut style = Style::default();
+        style.clip_path = Some(ClipPath::Inset(ClipPathInsets {
+            top: DefiniteLength::Fraction(0.),
+            right: DefiniteLength::Fraction(0.3),
+            bottom: DefiniteLength::Fraction(0.),
+            left: DefiniteLength::Fraction(0.8),
+        }));
+        let bounds = Bounds::new(Point::default(), size(px(100.), px(40.)));
+
+        let mask = style.clip_path_mask(bounds, px(16.)).unwrap();
+
+        assert!((f32::from(mask.bounds.origin.x) - 72.72727).abs() < 0.001);
+        assert_eq!(mask.bounds.size, size(px(0.), px(40.)));
     }
 
     #[perf]

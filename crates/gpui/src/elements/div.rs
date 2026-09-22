@@ -1325,6 +1325,19 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Set a human-readable, localized description of this element's role,
+    /// announced in place of the role's own name (`aria-roledescription`).
+    fn aria_role_description(mut self, role_description: impl Into<SharedString>) -> Self {
+        self.interactivity().aria.role_description = Some(role_description.into());
+        self
+    }
+
+    /// Set the kind of popup this element opens (`aria-haspopup`).
+    fn aria_has_popup(mut self, has_popup: accesskit::HasPopup) -> Self {
+        self.interactivity().aria.has_popup = Some(has_popup);
+        self
+    }
+
     /// Set the keyboard shortcut(s) that activate this element, announced by
     /// assistive technology (maps to AccessKit's `keyboard_shortcut`).
     ///
@@ -1461,6 +1474,24 @@ pub trait StatefulInteractiveElement: InteractiveElement {
     /// Set the orientation of this element.
     fn aria_orientation(mut self, orientation: accesskit::Orientation) -> Self {
         self.interactivity().aria.orientation = Some(orientation);
+        self
+    }
+
+    /// Set whether this element is operable but not editable.
+    fn aria_read_only(mut self, read_only: bool) -> Self {
+        self.interactivity().aria.read_only = Some(read_only);
+        self
+    }
+
+    /// Set whether user input is required on this element.
+    fn aria_required(mut self, required: bool) -> Self {
+        self.interactivity().aria.required = Some(required);
+        self
+    }
+
+    /// Set the input-validity state for this element.
+    fn aria_invalid(mut self, invalid: accesskit::Invalid) -> Self {
+        self.interactivity().aria.invalid = Some(invalid);
         self
     }
 
@@ -2086,6 +2117,8 @@ pub(crate) struct AriaProperties {
     pub(crate) label: Option<SharedString>,
     pub(crate) description: Option<SharedString>,
     pub(crate) keyshortcuts: Option<SharedString>,
+    pub(crate) role_description: Option<SharedString>,
+    pub(crate) has_popup: Option<accesskit::HasPopup>,
     pub(crate) selected: Option<bool>,
     pub(crate) current: Option<accesskit::AriaCurrent>,
     pub(crate) live: Option<accesskit::Live>,
@@ -2100,6 +2133,9 @@ pub(crate) struct AriaProperties {
     pub(crate) value: Option<SharedString>,
     pub(crate) placeholder: Option<SharedString>,
     pub(crate) orientation: Option<accesskit::Orientation>,
+    pub(crate) read_only: Option<bool>,
+    pub(crate) required: Option<bool>,
+    pub(crate) invalid: Option<accesskit::Invalid>,
     pub(crate) level: Option<usize>,
     pub(crate) position_in_set: Option<usize>,
     pub(crate) size_of_set: Option<usize>,
@@ -2366,16 +2402,21 @@ impl Interactivity {
                     window.with_content_mask(
                         style.overflow_mask(bounds, window.rem_size()),
                         |window| {
-                            let hitbox = if self.should_insert_hitbox(&style, window, cx) {
-                                Some(window.insert_hitbox(bounds, self.hitbox_behavior))
-                            } else {
-                                None
-                            };
+                            window.with_content_mask(
+                                style.clip_path_mask(bounds, window.rem_size()),
+                                |window| {
+                                    let hitbox = if self.should_insert_hitbox(&style, window, cx) {
+                                        Some(window.insert_hitbox(bounds, self.hitbox_behavior))
+                                    } else {
+                                        None
+                                    };
 
-                            let scroll_offset =
-                                self.clamp_scroll_position(bounds, &style, window, cx);
-                            let result = f(&style, scroll_offset, hitbox, window, cx);
-                            (result, element_state)
+                                    let scroll_offset =
+                                        self.clamp_scroll_position(bounds, &style, window, cx);
+                                    let result = f(&style, scroll_offset, hitbox, window, cx);
+                                    (result, element_state)
+                                },
+                            )
                         },
                     )
                 })
@@ -2527,100 +2568,125 @@ impl Interactivity {
                 }
 
                 window.with_element_opacity(style.opacity, |window| {
-                    style.paint(bounds, window, cx, |window: &mut Window, cx: &mut App| {
-                        window.with_text_style(style.text_style().cloned(), |window| {
-                            window.with_content_mask(
-                                style.overflow_mask(bounds, window.rem_size()),
-                                |window| {
-                                    window.with_tab_group(tab_group, |window| {
-                                        // Register the container's own focus handle *inside* its
-                                        // tab group, so that focusing the container and then
-                                        // calling `focus_next` descends into this group's first
-                                        // item. Inserting it before `with_tab_group` would give the
-                                        // container a shallower tab path than its children; with
-                                        // sibling groups every container would then sort ahead of
-                                        // every item, and `focus_next` from a container would jump
-                                        // to the first item in the whole window instead of its own.
-                                        if let Some(focus_handle) = &self.tracked_focus_handle {
-                                            window.next_frame.tab_stops.insert(focus_handle);
-                                        }
-                                        if let Some(hitbox) = hitbox {
-                                            #[cfg(debug_assertions)]
-                                            self.paint_debug_info(
-                                                global_id, hitbox, &style, window, cx,
-                                            );
-
-                                            if let Some(drag) = cx.active_drag.as_ref() {
-                                                if let Some(mouse_cursor) = drag.cursor_style {
-                                                    window.set_window_cursor_style(mouse_cursor);
+                    window.with_content_mask(
+                        style.clip_path_mask(bounds, window.rem_size()),
+                        |window| {
+                            style.paint(bounds, window, cx, |window: &mut Window, cx: &mut App| {
+                                window.with_text_style(style.text_style().cloned(), |window| {
+                                    window.with_content_mask(
+                                        style.overflow_mask(bounds, window.rem_size()),
+                                        |window| {
+                                            window.with_tab_group(tab_group, |window| {
+                                                // Register the container's own focus handle *inside* its
+                                                // tab group, so that focusing the container and then
+                                                // calling `focus_next` descends into this group's first
+                                                // item. Inserting it before `with_tab_group` would give the
+                                                // container a shallower tab path than its children; with
+                                                // sibling groups every container would then sort ahead of
+                                                // every item, and `focus_next` from a container would jump
+                                                // to the first item in the whole window instead of its own.
+                                                if let Some(focus_handle) =
+                                                    &self.tracked_focus_handle
+                                                {
+                                                    window
+                                                        .next_frame
+                                                        .tab_stops
+                                                        .insert(focus_handle);
                                                 }
-                                            } else {
-                                                if let Some(mouse_cursor) = style.mouse_cursor {
-                                                    window.set_cursor_style(mouse_cursor, hitbox);
-                                                }
-                                            }
+                                                if let Some(hitbox) = hitbox {
+                                                    #[cfg(debug_assertions)]
+                                                    self.paint_debug_info(
+                                                        global_id, hitbox, &style, window, cx,
+                                                    );
 
-                                            if let Some(group) = self.group.clone() {
-                                                GroupHitboxes::push(
-                                                    group,
-                                                    hitbox.id,
-                                                    global_id.cloned(),
-                                                    cx,
-                                                );
-                                            }
+                                                    if let Some(drag) = cx.active_drag.as_ref() {
+                                                        if let Some(mouse_cursor) =
+                                                            drag.cursor_style
+                                                        {
+                                                            window.set_window_cursor_style(
+                                                                mouse_cursor,
+                                                            );
+                                                        }
+                                                    } else {
+                                                        if let Some(mouse_cursor) =
+                                                            style.mouse_cursor
+                                                        {
+                                                            window.set_cursor_style(
+                                                                mouse_cursor,
+                                                                hitbox,
+                                                            );
+                                                        }
+                                                    }
 
-                                            if let Some(area) = self.window_control {
-                                                window.insert_window_control_hitbox(
-                                                    area,
-                                                    hitbox.clone(),
-                                                );
-                                            }
-
-                                            self.paint_mouse_listeners(
-                                                hitbox,
-                                                element_state.as_mut(),
-                                                window,
-                                                cx,
-                                            );
-                                            self.paint_scroll_listener(hitbox, &style, window, cx);
-                                        }
-
-                                        self.paint_keyboard_listeners(window, cx);
-
-                                        if window.a11y.is_active() {
-                                            if let Some(global_id) = global_id {
-                                                if !self.a11y_action_listeners.is_empty() {
-                                                    let node_id = global_id.accesskit_node_id();
-                                                    for (action, listener) in
-                                                        self.a11y_action_listeners.drain(..)
-                                                    {
-                                                        window.on_a11y_action(
-                                                            node_id, action, listener,
+                                                    if let Some(group) = self.group.clone() {
+                                                        GroupHitboxes::push(
+                                                            group,
+                                                            hitbox.id,
+                                                            global_id.cloned(),
+                                                            cx,
                                                         );
                                                     }
+
+                                                    if let Some(area) = self.window_control {
+                                                        window.insert_window_control_hitbox(
+                                                            area,
+                                                            hitbox.clone(),
+                                                        );
+                                                    }
+
+                                                    self.paint_mouse_listeners(
+                                                        hitbox,
+                                                        element_state.as_mut(),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                    self.paint_scroll_listener(
+                                                        hitbox, &style, window, cx,
+                                                    );
                                                 }
-                                            }
-                                        }
 
-                                        f(&style, window, cx);
+                                                self.paint_keyboard_listeners(window, cx);
 
-                                        if let Some(_hitbox) = hitbox {
-                                            #[cfg(any(feature = "inspector", debug_assertions))]
-                                            window.insert_inspector_hitbox(
-                                                _hitbox.id,
-                                                _inspector_id,
-                                                cx,
-                                            );
+                                                if window.a11y.is_active() {
+                                                    if let Some(global_id) = global_id {
+                                                        if !self.a11y_action_listeners.is_empty() {
+                                                            let node_id =
+                                                                global_id.accesskit_node_id();
+                                                            for (action, listener) in
+                                                                self.a11y_action_listeners.drain(..)
+                                                            {
+                                                                window.on_a11y_action(
+                                                                    node_id, action, listener,
+                                                                );
+                                                            }
+                                                        }
+                                                    }
+                                                }
 
-                                            if let Some(group) = self.group.as_ref() {
-                                                GroupHitboxes::pop(group, cx);
-                                            }
-                                        }
-                                    })
-                                },
-                            );
-                        });
-                    });
+                                                f(&style, window, cx);
+
+                                                if let Some(_hitbox) = hitbox {
+                                                    #[cfg(any(
+                                                        feature = "inspector",
+                                                        debug_assertions
+                                                    ))]
+                                                    window.insert_inspector_hitbox(
+                                                        _hitbox.id,
+                                                        _inspector_id,
+                                                        cx,
+                                                    );
+
+                                                    if let Some(group) = self.group.as_ref() {
+                                                        GroupHitboxes::pop(group, cx);
+                                                    }
+                                                }
+                                            })
+                                        },
+                                    );
+                                });
+                            });
+                        },
+                    );
                 });
 
                 ((), element_state)
@@ -3577,6 +3643,12 @@ impl Interactivity {
         if let Some(keyshortcuts) = &self.aria.keyshortcuts {
             node.set_keyboard_shortcut(keyshortcuts.to_string());
         }
+        if let Some(role_description) = &self.aria.role_description {
+            node.set_role_description(role_description.to_string());
+        }
+        if let Some(has_popup) = self.aria.has_popup {
+            node.set_has_popup(has_popup);
+        }
         if let Some(selected) = self.aria.selected {
             node.set_selected(selected);
         }
@@ -3626,6 +3698,23 @@ impl Interactivity {
         }
         if let Some(orientation) = self.aria.orientation {
             node.set_orientation(orientation);
+        }
+        if let Some(read_only) = self.aria.read_only {
+            if read_only {
+                node.set_read_only();
+            } else {
+                node.clear_read_only();
+            }
+        }
+        if let Some(required) = self.aria.required {
+            if required {
+                node.set_required();
+            } else {
+                node.clear_required();
+            }
+        }
+        if let Some(invalid) = self.aria.invalid {
+            node.set_invalid(invalid);
         }
         if let Some(level) = self.aria.level {
             node.set_level(level);
@@ -5885,6 +5974,47 @@ mod tests {
 
         assert_eq!(node.live(), Some(accesskit::Live::Assertive));
         assert!(!node.is_live_atomic());
+    }
+
+    #[test]
+    fn test_aria_popup_and_role_description_builders_write_accesskit_properties() {
+        let mut element = div()
+            .id("menu-trigger")
+            .aria_has_popup(accesskit::HasPopup::Menu)
+            .aria_role_description("Number field");
+        let mut node = accesskit::Node::new(accesskit::Role::Button);
+
+        element.interactivity().write_a11y_info(&mut node);
+
+        assert_eq!(node.has_popup(), Some(accesskit::HasPopup::Menu));
+        assert_eq!(node.role_description(), Some("Number field"));
+    }
+
+    #[test]
+    fn test_aria_form_state_builders_write_and_clear_accesskit_properties() {
+        let mut element = div()
+            .id("field")
+            .aria_orientation(accesskit::Orientation::Horizontal)
+            .aria_read_only(true)
+            .aria_required(true)
+            .aria_invalid(accesskit::Invalid::Grammar);
+        let mut node = accesskit::Node::new(accesskit::Role::TextInput);
+
+        element.interactivity().write_a11y_info(&mut node);
+
+        assert_eq!(node.orientation(), Some(accesskit::Orientation::Horizontal));
+        assert!(node.is_read_only());
+        assert!(node.is_required());
+        assert_eq!(node.invalid(), Some(accesskit::Invalid::Grammar));
+
+        let mut element = div()
+            .id("field")
+            .aria_read_only(false)
+            .aria_required(false);
+        element.interactivity().write_a11y_info(&mut node);
+
+        assert!(!node.is_read_only());
+        assert!(!node.is_required());
     }
 
     /// Two focusable, clickable elements ("a" and "b") used to exercise the

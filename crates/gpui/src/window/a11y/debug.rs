@@ -274,6 +274,9 @@ fn node_to_json(
     if let Some(v) = node.is_expanded() {
         aria.insert("expanded".into(), json!(v));
     }
+    if let Some(v) = node.has_popup() {
+        aria.insert("has_popup".into(), json!(format!("{v:?}")));
+    }
     if let Some(v) = node.toggled() {
         aria.insert("toggled".into(), json!(format!("{v:?}")));
     }
@@ -282,6 +285,15 @@ fn node_to_json(
     }
     if let Some(v) = node.orientation() {
         aria.insert("orientation".into(), json!(format!("{v:?}")));
+    }
+    if node.is_read_only() {
+        aria.insert("read_only".into(), json!(true));
+    }
+    if node.is_required() {
+        aria.insert("required".into(), json!(true));
+    }
+    if let Some(v) = node.invalid() {
+        aria.insert("invalid".into(), json!(format!("{v:?}")));
     }
 
     // Numeric properties.
