@@ -3184,7 +3184,14 @@ extern "C" fn display_layer(this: &Object, _: Sel, _: id) {
         lock.renderer.set_presents_with_transaction(true);
         lock.stop_display_link();
         drop(lock);
-        callback(Default::default());
+        // AppKit is asking for the layer's contents, and the present joins the
+        // transaction that shows them. Throttling this frame (an inactive
+        // window drawn recently) leaves stale contents on screen, such as a
+        // window's first frame after it is revealed.
+        callback(RequestFrameOptions {
+            require_presentation: true,
+            ..Default::default()
+        });
 
         let mut lock = window_state.lock();
         lock.request_frame_callback = Some(callback);
