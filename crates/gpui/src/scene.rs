@@ -247,12 +247,9 @@ impl Scene {
         self.quads.sort_by_key(|quad| quad.order);
         self.paths.sort_by_key(|path| path.order);
         self.underlines.sort_by_key(|underline| underline.order);
-        self.monochrome_sprites
-            .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
-        self.subpixel_sprites
-            .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
-        self.polychrome_sprites
-            .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
+        self.monochrome_sprites.sort_by_key(|sprite| sprite.order);
+        self.subpixel_sprites.sort_by_key(|sprite| sprite.order);
+        self.polychrome_sprites.sort_by_key(|sprite| sprite.order);
         self.surfaces.sort_by_key(|surface| surface.order);
     }
 
@@ -1118,6 +1115,49 @@ mod tests {
             corner_radii: Default::default(),
             border_widths: Default::default(),
         }
+    }
+
+    #[test]
+    fn sprites_sharing_an_order_keep_paint_order() {
+        let mut scene = Scene::default();
+        let clip_id = scene.insert_clip(ClipNode {
+            folded_bounds: bounds(0., 0., 100., 100.),
+            rounded_bounds: Default::default(),
+            corner_radii: Default::default(),
+            rounded_head: ClipNode::NONE,
+            parent_rounded: ClipNode::NONE,
+        });
+        let glyph = |x: f32, tile_id: u32| MonochromeSprite {
+            order: 0,
+            clip_id,
+            bounds: bounds(x, 0., 10., 18.),
+            color: Default::default(),
+            tile: AtlasTile {
+                texture_id: AtlasTextureId {
+                    index: 0,
+                    kind: crate::AtlasTextureKind::Monochrome,
+                },
+                tile_id: crate::TileId(tile_id),
+                padding: 0,
+                bounds: Default::default(),
+            },
+            transformation: TransformationMatrix::unit(),
+        };
+
+        // Overlapping glyphs in one layer share an order. The glyph painted
+        // second has the lower tile id, as a reused atlas can allocate it.
+        scene.push_layer(bounds(0., 0., 100., 100.));
+        scene.insert_primitive(glyph(0., 2));
+        scene.insert_primitive(glyph(8., 1));
+        scene.pop_layer();
+        scene.finish();
+
+        let painted: Vec<f32> = scene
+            .monochrome_sprites
+            .iter()
+            .map(|sprite| sprite.bounds.origin.x.0)
+            .collect();
+        assert_eq!(painted, [0., 8.]);
     }
 
     #[test]
