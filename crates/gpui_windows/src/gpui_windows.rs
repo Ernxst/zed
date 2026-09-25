@@ -38,6 +38,7 @@ pub(crate) use window::*;
 pub(crate) use wrapper::*;
 
 pub use platform::WindowsPlatform;
+pub use window::show_window_opened_hidden;
 #[cfg(feature = "test-support")]
 pub use platform::{test_reduce_motion_change_count, test_set_reduce_motion_override};
 #[cfg(feature = "test-support")]
