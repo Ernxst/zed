@@ -1646,10 +1646,14 @@ impl Window {
 
         platform_window.finish_open()?;
 
-        let tab_bar_visible = platform_window.tab_bar_visible();
-        SystemWindowTabController::init_visible(cx, tab_bar_visible);
-        if let Some(tabs) = platform_window.tabbed_windows() {
-            SystemWindowTabController::add_tab(cx, handle.window_id(), tabs);
+        let has_other_windows = !cx.windows().is_empty();
+        if has_other_windows {
+            let tab_bar_visible = platform_window.tab_bar_visible();
+            SystemWindowTabController::init_visible(cx, tab_bar_visible);
+
+            if let Some(tabs) = platform_window.tabbed_windows() {
+                SystemWindowTabController::add_tab(cx, handle.window_id(), tabs);
+            }
         }
 
         let display_id = platform_window.display().map(|display| display.id());
