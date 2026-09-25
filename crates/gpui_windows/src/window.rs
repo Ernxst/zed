@@ -598,13 +598,14 @@ impl WindowsWindow {
             )));
         }
         let mut placement = placement;
+        if !params.focus {
+            placement.showCmd = SW_SHOWNOACTIVATE.0 as u32;
+        }
         // The window must stay hidden until `finish_open`, which runs after
         // accessibility setup has installed the AccessKit adapter. A `show: false`
-        // window keeps this placement pending for a later `activate` instead.
+        // window keeps this placement pending for a later `activate` or
+        // `show_window_opened_hidden` instead.
         if params.show {
-            if !params.focus {
-                placement.showCmd = SW_SHOWNOACTIVATE.0 as u32;
-            }
             this.state.show_at_open.set(true);
         }
         this.state.initial_placement.set(Some(WindowOpenStatus {
@@ -1513,6 +1514,20 @@ unsafe extern "system" fn window_procedure(
     }
 
     result
+}
+
+/// Shows a window opened with `show: false` by applying its pending initial placement, which
+/// takes focus or not as the window's `focus` option asked. Unlike `activate`, it does not
+/// otherwise activate the window. Does nothing to a window that has already been shown.
+///
+/// Returns `false` when `hwnd` is not a live GPUI window. Must be called on the thread that
+/// runs the GPUI application.
+pub fn show_window_opened_hidden(hwnd: std::num::NonZeroIsize) -> anyhow::Result<bool> {
+    let Some(window) = window_from_hwnd(HWND(hwnd.get() as *mut std::ffi::c_void)) else {
+        return Ok(false);
+    };
+    window.set_window_placement()?;
+    Ok(true)
 }
 
 pub(crate) fn window_from_hwnd(hwnd: HWND) -> Option<Rc<WindowsWindowInner>> {
