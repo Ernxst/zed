@@ -1783,6 +1783,9 @@ impl PlatformWindow for MacWindow {
             //  is different from the primary screen.
             NSWindow::setFrameTopLeftPoint_(native_window, presentation.top_left);
         }
+        if presentation.show {
+            self.0.lock().start_display_link();
+        }
         self.0.lock().move_traffic_light();
 
         Ok(())
