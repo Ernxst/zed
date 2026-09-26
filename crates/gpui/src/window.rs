@@ -6,7 +6,7 @@ use crate::Inspector;
 use crate::profiler;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AtlasTile, AvailableSpace, Axis, Background, BorderStyle, Bounds,
+    AsyncWindowContext, AtlasKey, AtlasTile, AvailableSpace, Axis, Background, BorderStyle, Bounds,
     BoxShadow, Capslock, ClipNode, Context, Corners, CursorHideMode, CursorStyle, Decorations,
     DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect,
     Entity, EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId,
@@ -5688,10 +5688,10 @@ impl Window {
                 image_id: data.id,
                 frame_index,
             };
-            let key = params.into();
+            let key: AtlasKey = params.into();
             let previous_tile = self
                 .sprite_atlas
-                .get_or_insert_with(&key, &mut || Ok(None))?;
+                .get_or_insert_with(key.clone(), &mut || Ok(None))?;
             let bytes = data
                 .as_bytes(frame_index)
                 .ok_or_else(|| anyhow!("missing image frame {frame_index}"))?;

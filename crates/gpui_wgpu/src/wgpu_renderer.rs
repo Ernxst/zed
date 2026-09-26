@@ -1,4 +1,4 @@
-use crate::{CompositorGpuHint, WgpuAtlas, WgpuContext};
+use crate::{CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext};
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
 use gpui::{
@@ -235,7 +235,7 @@ pub struct WgpuRenderer {
     max_texture_size: u32,
     last_error: Arc<Mutex<Option<String>>>,
     failed_frame_count: u32,
-    device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    device_lost: std::sync::Arc<DeviceErrorState>,
     surface_configured: bool,
     needs_redraw: bool,
 }
@@ -588,7 +588,7 @@ impl WgpuRenderer {
             max_texture_size,
             last_error,
             failed_frame_count: 0,
-            device_lost: context.device_lost_flag(),
+            device_lost: Arc::clone(context.errors()),
             surface_configured: true,
             needs_redraw: false,
         })
@@ -1771,7 +1771,9 @@ impl WgpuRenderer {
         if range.is_empty() {
             return;
         }
-        let texture_info = self.atlas.get_texture_info(texture_id);
+        let Some(texture_info) = self.atlas.get_texture_info(texture_id) else {
+            return;
+        };
         let texture =
             self.create_texture_bind_group("atlas_texture_bind_group", &texture_info.view);
         pass.set_pipeline(pipeline);
@@ -2235,7 +2237,7 @@ impl WgpuRenderer {
 
     /// Returns true if the GPU device was lost and recovery is needed.
     pub fn device_lost(&self) -> bool {
-        self.device_lost.load(std::sync::atomic::Ordering::SeqCst)
+        self.device_lost.device_lost()
     }
 
     /// Returns true if a redraw is needed because GPU state was cleared.

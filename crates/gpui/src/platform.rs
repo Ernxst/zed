@@ -1503,7 +1503,7 @@ pub trait PlatformAtlas {
         bytes: &[u8],
     ) -> Result<Option<AtlasTile>> {
         self.remove(key);
-        self.get_or_insert_with(key, &mut || Ok(Some((size, Cow::Borrowed(bytes)))))
+        self.get_or_insert_with(key.clone(), &mut || Ok(Some((size, Cow::Borrowed(bytes)))))
     }
 
     fn remove(&self, key: &AtlasKey);

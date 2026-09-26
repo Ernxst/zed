@@ -1003,7 +1003,7 @@ impl PlatformWindow for WebWindow {
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
-        self.inner.state.borrow().renderer.gpu_specs()
+        Some(self.inner.state.borrow().renderer.gpu_specs())
     }
 
     fn update_ime_position(&self, bounds: Bounds<Pixels>) {
