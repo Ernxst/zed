@@ -1,6 +1,7 @@
 use crate::{CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext};
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
+use collections::FxHashMap;
 use gpui::{
     AtlasTextureId, Background, Bounds, ClipNode, DevicePixels, GpuSpecs, Path, Point,
     PrimitiveBatch, ScaledPixels, Scene, Size, get_gamma_correction_ratios,
@@ -187,6 +188,7 @@ struct WgpuResources {
     pipelines: WgpuPipelines,
     bind_group_layouts: WgpuBindGroupLayouts,
     atlas_sampler: wgpu::Sampler,
+    atlas_texture_bind_groups: FxHashMap<AtlasTextureId, CachedTextureBindGroup>,
     #[allow(dead_code)]
     surface_sampler: wgpu::Sampler,
     #[allow(dead_code)]
@@ -199,6 +201,11 @@ struct WgpuResources {
     path_intermediate_view: Option<wgpu::TextureView>,
     path_msaa_texture: Option<wgpu::Texture>,
     path_msaa_view: Option<wgpu::TextureView>,
+}
+
+struct CachedTextureBindGroup {
+    texture_generation: u64,
+    bind_group: wgpu::BindGroup,
 }
 
 impl WgpuResources {
@@ -289,7 +296,7 @@ impl WgpuRenderer {
             .borrow()
             .as_ref()
             .map(|ctx| ctx.instance.clone())
-            .unwrap_or_else(|| WgpuContext::instance(Box::new(window.clone())));
+            .unwrap_or_else(|| WgpuContext::instance(Some(Box::new(window.clone()))));
 
         // Safety: The caller guarantees that the window handle is valid for the
         // lifetime of this renderer. In practice, the RawWindow struct is created
@@ -553,6 +560,7 @@ impl WgpuRenderer {
             pipelines,
             bind_group_layouts,
             atlas_sampler,
+            atlas_texture_bind_groups: FxHashMap::default(),
             surface_sampler,
             surface_uniform_buffer,
             globals_buffer,
@@ -1474,6 +1482,7 @@ impl WgpuRenderer {
         frame_view: &wgpu::TextureView,
         mut instance_offset: u64,
     ) -> Result<()> {
+        self.prepare_texture_bind_groups(scene);
         let instance_bindings = self
             .write_instances(scene, &mut instance_offset)
             .with_context(|| {
@@ -1741,6 +1750,51 @@ impl WgpuRenderer {
             })
     }
 
+    fn prepare_texture_bind_groups(&mut self, scene: &Scene) {
+        let mut texture_ids = Vec::new();
+        for batch in scene.batches() {
+            let texture_id = match batch {
+                PrimitiveBatch::MonochromeSprites { texture_id, .. }
+                | PrimitiveBatch::SubpixelSprites { texture_id, .. }
+                | PrimitiveBatch::PolychromeSprites { texture_id, .. } => texture_id,
+                _ => continue,
+            };
+            if !texture_ids.contains(&texture_id) {
+                texture_ids.push(texture_id);
+            }
+        }
+
+        self.resources_mut()
+            .atlas_texture_bind_groups
+            .retain(|texture_id, _| texture_ids.contains(texture_id));
+
+        for texture_id in texture_ids {
+            let Some(texture_info) = self.atlas.get_texture_info(texture_id) else {
+                continue;
+            };
+            let is_current = self
+                .resources()
+                .atlas_texture_bind_groups
+                .get(&texture_id)
+                .is_some_and(|cached| cached.texture_generation == texture_info.generation);
+            if is_current {
+                continue;
+            }
+
+            let bind_group = self.create_texture_bind_group(
+                "atlas_texture_bind_group",
+                &texture_info.view,
+            );
+            self.resources_mut().atlas_texture_bind_groups.insert(
+                texture_id,
+                CachedTextureBindGroup {
+                    texture_generation: texture_info.generation,
+                    bind_group,
+                },
+            );
+        }
+    }
+
     fn draw_instances(
         &self,
         instances: &InstanceBinding,
@@ -1771,15 +1825,14 @@ impl WgpuRenderer {
         if range.is_empty() {
             return;
         }
-        let Some(texture_info) = self.atlas.get_texture_info(texture_id) else {
+        let resources = self.resources();
+        let Some(texture) = resources.atlas_texture_bind_groups.get(&texture_id) else {
             return;
         };
-        let texture =
-            self.create_texture_bind_group("atlas_texture_bind_group", &texture_info.view);
         pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &self.resources().globals_bind_group, &[]);
+        pass.set_bind_group(0, &resources.globals_bind_group, &[]);
         pass.set_bind_group(1, &sprite_instances.bind_group, &[]);
-        pass.set_bind_group(2, &texture, &[]);
+        pass.set_bind_group(2, &texture.bind_group, &[]);
         pass.draw(
             0..4,
             sprite_instances.first_instance + range.start
@@ -2283,7 +2336,7 @@ impl WgpuRenderer {
             // may need more time to come back (e.g. after suspend/resume).
             std::thread::sleep(std::time::Duration::from_millis(350));
 
-            let instance = WgpuContext::instance(Box::new(window.clone()));
+            let instance = WgpuContext::instance(Some(Box::new(window.clone())));
             let surface = create_surface(&instance, window_handle.as_raw())?;
             let new_context =
                 WgpuContext::new_rejecting_software(instance, &surface, self.compositor_gpu)?;
