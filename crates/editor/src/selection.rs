@@ -66,24 +66,10 @@ impl Editor {
             state.changed |= changed;
             return result;
         }
-        let mut state = DeferredSelectionEffectsState {
-            changed: false,
-            effects,
-            old_cursor_position: self.selections.newest_anchor().head(),
-            history_entry: SelectionHistoryEntry {
-                selections: self.selections.disjoint_anchors_arc(),
-                select_next_state: self.select_next_state.clone(),
-                select_prev_state: self.select_prev_state.clone(),
-                add_selections_state: self.add_selections_state.clone(),
-            },
-        };
+        let mut state = self.prepare_selection_effects(effects);
         let (changed, result) = self.selections.change_with(&snapshot, change);
         state.changed = state.changed || changed;
-        if self.defer_selection_effects {
-            self.deferred_selection_effects_state = Some(state);
-        } else {
-            self.apply_selection_effects(state, window, cx);
-        }
+        self.apply_selection_effects(state, window, cx);
         result
     }
 
@@ -119,12 +105,7 @@ impl Editor {
         let already_deferred = self.defer_selection_effects;
         self.defer_selection_effects = true;
         let result = update(self, window, cx);
-        if !already_deferred {
-            self.defer_selection_effects = false;
-            if let Some(state) = self.deferred_selection_effects_state.take() {
-                self.apply_selection_effects(state, window, cx);
-            }
-        }
+        self.finish_deferred_selection_effects(already_deferred, window, cx);
         result
     }
 
@@ -1539,6 +1520,34 @@ impl Editor {
         }
     }
 
+    /// Re-publishes the current selections to collaborators immediately. The
+    /// per-change broadcast in `selections_did_change` is skipped while the
+    /// project is unshared, so when a project becomes shared this is called to
+    /// re-establish this editor's cursor for peers, who would otherwise not see
+    /// it until the next selection change.
+    pub(crate) fn republish_active_selections(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let should_broadcast_selections = self
+            .collaboration_hub()
+            .is_some_and(|hub| hub.should_broadcast_selections(cx));
+        if should_broadcast_selections
+            && self.focus_handle.is_focused(window)
+            && self.leader_id.is_none()
+        {
+            self.buffer.update(cx, |buffer, cx| {
+                buffer.set_active_selections(
+                    &self.selections.disjoint_anchors_arc(),
+                    self.selections.line_mode(),
+                    self.cursor_shape,
+                    cx,
+                )
+            });
+        }
+    }
+
     fn selections_did_change(
         &mut self,
         local: bool,
@@ -1577,7 +1586,13 @@ impl Editor {
 
         let selection_anchors = self.selections.disjoint_anchors_arc();
 
-        if self.focus_handle.is_focused(window) && self.leader_id.is_none() {
+        let should_broadcast_selections = self
+            .collaboration_hub()
+            .is_some_and(|hub| hub.should_broadcast_selections(cx));
+        if should_broadcast_selections
+            && self.focus_handle.is_focused(window)
+            && self.leader_id.is_none()
+        {
             self.buffer.update(cx, |buffer, cx| {
                 buffer.set_active_selections(
                     &selection_anchors,
@@ -1600,6 +1615,7 @@ impl Editor {
         self.invalidate_autoclose_regions(&selection_anchors, buffer);
         self.snippet_stack.invalidate(&selection_anchors, buffer);
         self.take_rename(false, window, cx);
+        self.take_inline_input(window, cx);
 
         let newest_selection = self.selections.newest_anchor();
         let new_cursor_position = newest_selection.head();
@@ -1741,12 +1757,51 @@ impl Editor {
         cx.notify();
     }
 
+    #[inline(never)]
+    fn prepare_selection_effects(
+        &self,
+        effects: SelectionEffects,
+    ) -> DeferredSelectionEffectsState {
+        DeferredSelectionEffectsState {
+            changed: false,
+            effects,
+            old_cursor_position: self.selections.newest_anchor().head(),
+            history_entry: SelectionHistoryEntry {
+                selections: self.selections.disjoint_anchors_arc(),
+                select_next_state: self.select_next_state.clone(),
+                select_prev_state: self.select_prev_state.clone(),
+                add_selections_state: self.add_selections_state.clone(),
+            },
+        }
+    }
+
+    #[inline(never)]
+    fn finish_deferred_selection_effects(
+        &mut self,
+        already_deferred: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !already_deferred {
+            self.defer_selection_effects = false;
+            if let Some(state) = self.deferred_selection_effects_state.take() {
+                self.apply_selection_effects(state, window, cx);
+            }
+        }
+    }
+
+    #[inline(never)]
     fn apply_selection_effects(
         &mut self,
         state: DeferredSelectionEffectsState,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.defer_selection_effects {
+            self.deferred_selection_effects_state = Some(state);
+            return;
+        }
+
         if state.changed {
             self.selection_history.push(state.history_entry);
 

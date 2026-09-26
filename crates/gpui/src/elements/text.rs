@@ -685,21 +685,25 @@ impl TextLayout {
 
             move |known_dimensions, available_space, window, cx| {
                 let wrap_width = if whitespace_soft_wraps(text_style.white_space) {
-                    known_dimensions.width.or_else(|| match available_space.width {
-                        crate::AvailableSpace::Definite(x) => Some(x),
-                        crate::AvailableSpace::MinContent => window
-                            .text_system()
-                            .shape_text(text.clone(), font_size, &runs, None, None)
-                            .log_err()
-                            .map(|lines| {
-                                lines.iter().fold(px(0.), |width, line| {
-                                    width.max(
-                                        line.layout.unwrapped_layout.min_content_width(&line.text),
-                                    )
-                                })
-                            }),
-                        crate::AvailableSpace::MaxContent => None,
-                    })
+                    known_dimensions
+                        .width
+                        .or_else(|| match available_space.width {
+                            crate::AvailableSpace::Definite(x) => Some(x),
+                            crate::AvailableSpace::MinContent => window
+                                .text_system()
+                                .shape_text(text.clone(), font_size, &runs, None, None)
+                                .log_err()
+                                .map(|lines| {
+                                    lines.iter().fold(px(0.), |width, line| {
+                                        width.max(
+                                            line.layout
+                                                .unwrapped_layout
+                                                .min_content_width(&line.text),
+                                        )
+                                    })
+                                }),
+                            crate::AvailableSpace::MaxContent => None,
+                        })
                 } else {
                     None
                 };
@@ -1061,6 +1065,7 @@ pub struct InteractiveTextState {
     mouse_down_index: Rc<Cell<Option<usize>>>,
     hovered_index: Rc<Cell<Option<usize>>>,
     active_tooltip: Rc<RefCell<Option<ActiveTooltip>>>,
+    long_press_tooltip_active: Rc<Cell<bool>>,
 }
 
 /// InteractiveTest is a wrapper around StyledText that adds mouse interactions.
@@ -1168,6 +1173,7 @@ impl Element for InteractiveText {
                             set_tooltip_on_window(&interactive_state.active_tooltip, window);
                     } else {
                         // If there is no longer a tooltip builder, remove the active tooltip.
+                        interactive_state.long_press_tooltip_active.set(false);
                         interactive_state.active_tooltip.take();
                     }
                 }
@@ -1316,6 +1322,7 @@ impl Element for InteractiveText {
                         build_tooltip,
                         check_is_hovered,
                         check_is_hovered_during_prepaint,
+                        interactive_state.long_press_tooltip_active.clone(),
                         None,
                         window,
                     );
