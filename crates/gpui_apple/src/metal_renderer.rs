@@ -170,6 +170,7 @@ pub struct MetalRenderer {
     polychrome_sprites_pipeline_state: metal::RenderPipelineState,
     surfaces_pipeline_state: metal::RenderPipelineState,
     rgba_surfaces_pipeline_state: metal::RenderPipelineState,
+    opaque_rgba_surfaces_pipeline_state: metal::RenderPipelineState,
     unit_vertices: metal::Buffer,
     #[allow(clippy::arc_with_non_send_sync)]
     instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
@@ -340,6 +341,7 @@ pub struct MetalTextureSurface {
     pub texture: metal::Texture,
     pub ready_event: metal::SharedEvent,
     pub ready_value: u64,
+    pub opaque: bool,
     _owner: Arc<dyn std::any::Any + Send + Sync>,
 }
 
@@ -349,6 +351,23 @@ impl MetalTextureSurface {
         ready_value: u64,
         owner: Arc<dyn std::any::Any + Send + Sync>,
     ) -> Self {
+        Self::new_with_alpha(texture, ready_value, owner, false)
+    }
+
+    pub fn new_opaque(
+        texture: metal::Texture,
+        ready_value: u64,
+        owner: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Self {
+        Self::new_with_alpha(texture, ready_value, owner, true)
+    }
+
+    fn new_with_alpha(
+        texture: metal::Texture,
+        ready_value: u64,
+        owner: Arc<dyn std::any::Any + Send + Sync>,
+        opaque: bool,
+    ) -> Self {
         // The event is created by the texture's MTLDevice, so a future
         // producer signal and compositor wait necessarily address one device.
         let ready_event = texture.device().new_shared_event();
@@ -356,6 +375,7 @@ impl MetalTextureSurface {
             texture,
             ready_event,
             ready_value,
+            opaque,
             _owner: owner,
         }
     }
@@ -564,6 +584,14 @@ impl MetalRenderer {
             "rgba_surface_fragment",
             MTLPixelFormat::BGRA8Unorm,
         );
+        let opaque_rgba_surfaces_pipeline_state = build_pipeline_state(
+            &device,
+            &library,
+            "opaque_rgba_surfaces",
+            "surface_vertex",
+            "opaque_rgba_surface_fragment",
+            MTLPixelFormat::BGRA8Unorm,
+        );
 
         let command_queue = device.new_command_queue();
         let sprite_atlas = Arc::new(MetalAtlas::new(device.clone(), is_apple_gpu));
@@ -590,6 +618,7 @@ impl MetalRenderer {
             polychrome_sprites_pipeline_state,
             surfaces_pipeline_state,
             rgba_surfaces_pipeline_state,
+            opaque_rgba_surfaces_pipeline_state,
             unit_vertices,
             instance_buffer_pool,
             sprite_atlas,
@@ -787,12 +816,22 @@ impl MetalRenderer {
             viewport_size,
         )?;
 
+        let texture_surfaces: Vec<Arc<MetalTextureSurface>> = scene
+            .surfaces
+            .iter()
+            .filter_map(|surface| match &surface.source {
+                PaintSurfaceSource::Texture { texture, .. } => texture.clone().downcast().ok(),
+                _ => None,
+            })
+            .collect();
+        let texture_surfaces = Cell::new(Some(texture_surfaces));
         let instance_buffer_pool = self.instance_buffer_pool.clone();
         let instance_buffer = Cell::new(Some(writer.finish()));
         let block = ConcreteBlock::new(move |_| {
             if let Some(instance_buffer) = instance_buffer.take() {
                 instance_buffer_pool.lock().release(instance_buffer);
             }
+            texture_surfaces.take();
         });
         let block = block.copy();
         command_buffer.add_completed_handler(&block);
@@ -1513,7 +1552,11 @@ impl MetalRenderer {
                         log::error!("unsupported macOS texture surface bridge");
                         continue;
                     };
-                    command_encoder.set_render_pipeline_state(&self.rgba_surfaces_pipeline_state);
+                    command_encoder.set_render_pipeline_state(if surface.opaque {
+                        &self.opaque_rgba_surfaces_pipeline_state
+                    } else {
+                        &self.rgba_surfaces_pipeline_state
+                    });
                     command_encoder.set_vertex_bytes(
                         SurfaceInputIndex::TextureSize as u64,
                         mem::size_of_val(texture_size) as u64,
