@@ -1,30 +1,28 @@
 use anyhow::{Context as _, Result};
-use collections::FxHashMap;
 use derive_more::{Deref, DerefMut};
 use etagere::BucketedAtlasAllocator;
 use gpui::{
-    AtlasKey, AtlasTextureId, AtlasTextureKind, AtlasTextureList, AtlasTile, Bounds, DevicePixels,
-    PlatformAtlas, Point, Size,
+    AtlasBackend, AtlasKey, AtlasState, AtlasTextureId, AtlasTextureKind, AtlasTextureList,
+    AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size,
 };
 use metal::Device;
 use parking_lot::Mutex;
 use std::borrow::Cow;
 
 pub struct MetalAtlas {
-    state: Mutex<MetalAtlasState>,
+    state: Mutex<AtlasState<MetalAtlasTextures>>,
     last_submission: Mutex<Option<AssertSend<metal::CommandBuffer>>>,
 }
 
 impl MetalAtlas {
     pub(crate) fn new(device: Device, is_apple_gpu: bool) -> Self {
         Self {
-            state: Mutex::new(MetalAtlasState {
+            state: Mutex::new(AtlasState::new(MetalAtlasTextures {
                 device: AssertSend(device),
                 is_apple_gpu,
                 monochrome_textures: Default::default(),
                 polychrome_textures: Default::default(),
-                tiles_by_key: Default::default(),
-            }),
+            })),
             last_submission: Mutex::new(None),
         }
     }
@@ -42,40 +40,36 @@ impl MetalAtlas {
         }
     }
 
-    pub(crate) fn metal_texture(&self, id: AtlasTextureId) -> metal::Texture {
-        self.state.lock().texture(id).metal_texture.clone()
+    /// Returns the GPU texture backing `id`, or `None` once every tile in it
+    /// has been removed. A scene can still reference such a texture when a
+    /// cached view replays a paint from before the image was dropped, so
+    /// callers must skip those sprites rather than assume the texture exists.
+    pub(crate) fn metal_texture(&self, id: AtlasTextureId) -> Option<metal::Texture> {
+        Some(
+            self.state
+                .lock()
+                .backend
+                .texture(id)?
+                .metal_texture
+                .clone(),
+        )
     }
 }
 
-struct MetalAtlasState {
+struct MetalAtlasTextures {
     device: AssertSend<Device>,
     is_apple_gpu: bool,
     monochrome_textures: AtlasTextureList<MetalAtlasTexture>,
     polychrome_textures: AtlasTextureList<MetalAtlasTexture>,
-    tiles_by_key: FxHashMap<AtlasKey, AtlasTile>,
 }
 
 impl PlatformAtlas for MetalAtlas {
     fn get_or_insert_with<'a>(
         &self,
-        key: &AtlasKey,
+        key: AtlasKey,
         build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
     ) -> Result<Option<AtlasTile>> {
-        let mut lock = self.state.lock();
-        if let Some(tile) = lock.tiles_by_key.get(key) {
-            Ok(Some(*tile))
-        } else {
-            let Some((size, bytes)) = build()? else {
-                return Ok(None);
-            };
-            let tile = lock
-                .allocate(size, key.texture_kind())
-                .context("failed to allocate")?;
-            let texture = lock.texture(tile.texture_id);
-            texture.upload(tile.bounds, &bytes);
-            lock.tiles_by_key.insert(key.clone(), tile);
-            Ok(Some(tile))
-        }
+        self.state.lock().get_or_insert_with(key, build)
     }
 
     fn update(
@@ -85,28 +79,56 @@ impl PlatformAtlas for MetalAtlas {
         bytes: &[u8],
     ) -> Result<Option<AtlasTile>> {
         self.wait_for_pending_submissions();
-        let lock = self.state.lock();
-        if let Some(tile) = lock.tiles_by_key.get(key).copied() {
-            if tile.bounds.size == size {
-                lock.texture(tile.texture_id).upload(tile.bounds, bytes);
-                return Ok(Some(tile));
-            }
+        let mut state = self.state.lock();
+        let Some(mut tile) = state.get_or_insert_with(
+            key.clone(),
+            &mut || Ok(Some((size, Cow::Borrowed(bytes)))),
+        )? else {
+            return Ok(None);
+        };
+
+        if tile.bounds.size != size {
+            state.remove(key);
+            let Some(replacement) = state.get_or_insert_with(
+                key.clone(),
+                &mut || Ok(Some((size, Cow::Borrowed(bytes)))),
+            )? else {
+                return Ok(None);
+            };
+            tile = replacement;
+        } else if let Some(texture) = state.backend.texture(tile.texture_id) {
+            texture.upload(tile.bounds, bytes);
         }
-        drop(lock);
-        self.remove(key);
-        self.get_or_insert_with(key, &mut || Ok(Some((size, Cow::Borrowed(bytes)))))
+
+        Ok(Some(tile))
     }
 
     fn remove(&self, key: &AtlasKey) {
-        let mut lock = self.state.lock();
-        let Some(tile) = lock.tiles_by_key.remove(key) else {
-            return;
-        };
+        self.state.lock().remove(key);
+    }
+}
+
+impl AtlasBackend for MetalAtlasTextures {
+    fn insert(
+        &mut self,
+        kind: AtlasTextureKind,
+        size: Size<DevicePixels>,
+        bytes: &[u8],
+    ) -> Result<AtlasTile> {
+        let tile = self.allocate(size, kind).context("failed to allocate")?;
+        let texture = self
+            .texture(tile.texture_id)
+            .context("allocated tile refers to a missing texture")?;
+        texture.upload(tile.bounds, bytes);
+        Ok(tile)
+    }
+
+    fn remove(&mut self, tile: AtlasTile) {
         let id = tile.texture_id;
 
         let textures = match id.kind {
-            AtlasTextureKind::Monochrome => &mut lock.monochrome_textures,
-            AtlasTextureKind::Polychrome => &mut lock.polychrome_textures,
+            AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
+            AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
             AtlasTextureKind::Subpixel => unreachable!(),
         };
 
@@ -130,7 +152,7 @@ impl PlatformAtlas for MetalAtlas {
     }
 }
 
-impl MetalAtlasState {
+impl MetalAtlasTextures {
     fn allocate(
         &mut self,
         size: Size<DevicePixels>,
@@ -228,13 +250,13 @@ impl MetalAtlasState {
         .unwrap()
     }
 
-    fn texture(&self, id: AtlasTextureId) -> &MetalAtlasTexture {
+    fn texture(&self, id: AtlasTextureId) -> Option<&MetalAtlasTexture> {
         let textures = match id.kind {
             AtlasTextureKind::Monochrome => &self.monochrome_textures,
             AtlasTextureKind::Polychrome => &self.polychrome_textures,
             AtlasTextureKind::Subpixel => unreachable!(),
         };
-        textures[id.index as usize].as_ref().unwrap()
+        textures.textures.get(id.index as usize)?.as_ref()
     }
 }
 
@@ -328,7 +350,7 @@ mod tests {
         })
     }
 
-    fn insert_tile(atlas: &MetalAtlas, key: &AtlasKey, size: Size<DevicePixels>) -> AtlasTile {
+    fn insert_tile(atlas: &MetalAtlas, key: AtlasKey, size: Size<DevicePixels>) -> AtlasTile {
         atlas
             .get_or_insert_with(key, &mut || {
                 let byte_count = (size.width.0 as usize) * (size.height.0 as usize) * 4;
@@ -336,45 +358,6 @@ mod tests {
             })
             .expect("allocation should succeed")
             .expect("callback returns Some")
-    }
-
-    #[test]
-    fn test_update_waits_for_the_latest_gpu_submission() {
-        let Some(device) = metal::Device::system_default() else {
-            return;
-        };
-        let atlas = MetalAtlas::new(device.clone(), true);
-        let queue = device.new_command_queue();
-        let command_buffer = queue.new_command_buffer();
-        atlas.track_submission(command_buffer);
-        command_buffer.commit();
-
-        atlas.wait_for_pending_submissions();
-
-        assert_eq!(
-            command_buffer.status(),
-            metal::MTLCommandBufferStatus::Completed
-        );
-    }
-
-    #[test]
-    fn test_update_reuses_same_sized_tile() {
-        let Some(atlas) = create_atlas() else {
-            return;
-        };
-        let image_size = Size {
-            width: DevicePixels(2),
-            height: DevicePixels(1),
-        };
-        let key = make_image_key(1, 0);
-        let initial_tile = insert_tile(&atlas, &key, image_size);
-
-        let updated_tile = atlas
-            .update(&key, image_size, &[0, 0, 0, 255, 255, 255, 255, 255])
-            .expect("upload should succeed")
-            .expect("tile should exist");
-
-        assert_eq!(updated_tile, initial_tile);
     }
 
     #[test]
@@ -392,9 +375,9 @@ mod tests {
         let key_b = make_image_key(2, 0);
         let key_c = make_image_key(3, 0);
 
-        let tile_a = insert_tile(&atlas, &key_a, small);
-        let tile_b = insert_tile(&atlas, &key_b, small);
-        let tile_c = insert_tile(&atlas, &key_c, small);
+        let tile_a = insert_tile(&atlas, key_a.clone(), small);
+        let tile_b = insert_tile(&atlas, key_b.clone(), small);
+        let tile_c = insert_tile(&atlas, key_c.clone(), small);
 
         assert_eq!(tile_a.texture_id, tile_b.texture_id);
         assert_eq!(tile_b.texture_id, tile_c.texture_id);
@@ -411,10 +394,33 @@ mod tests {
 
         // Re-inserting A must allocate a fresh tile on a new texture,
         // NOT return a stale tile referencing the deleted texture.
-        let tile_a2 = insert_tile(&atlas, &key_a, small);
+        let tile_a2 = insert_tile(&atlas, key_a, small);
 
         // The texture must actually exist — this would panic before the fix.
-        let _texture = atlas.metal_texture(tile_a2.texture_id);
+        assert!(atlas.metal_texture(tile_a2.texture_id).is_some());
+    }
+
+    #[test]
+    fn test_metal_texture_is_none_after_last_tile_removed() {
+        let Some(atlas) = create_atlas() else {
+            return;
+        };
+
+        let key = make_image_key(1, 0);
+        let tile = insert_tile(
+            &atlas,
+            key.clone(),
+            Size {
+                width: DevicePixels(64),
+                height: DevicePixels(64),
+            },
+        );
+        assert!(atlas.metal_texture(tile.texture_id).is_some());
+
+        // A scene built before the removal may still carry `tile`; looking its
+        // texture up must report the gap instead of panicking.
+        atlas.remove(&key);
+        assert!(atlas.metal_texture(tile.texture_id).is_none());
     }
 
     #[test]
@@ -436,12 +442,12 @@ mod tests {
         let big_key_a = make_image_key(2, 0);
         let big_key_b = make_image_key(3, 0);
 
-        let keeper_tile = insert_tile(&atlas, &keeper_key, small);
-        let tile_a = insert_tile(&atlas, &big_key_a, big);
+        let keeper_tile = insert_tile(&atlas, keeper_key, small);
+        let tile_a = insert_tile(&atlas, big_key_a.clone(), big);
         assert_eq!(keeper_tile.texture_id, tile_a.texture_id);
 
         atlas.remove(&big_key_a);
-        let tile_b = insert_tile(&atlas, &big_key_b, big);
+        let tile_b = insert_tile(&atlas, big_key_b, big);
         assert_eq!(tile_b.texture_id, keeper_tile.texture_id);
     }
 

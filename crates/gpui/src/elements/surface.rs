@@ -257,13 +257,16 @@ mod tests {
                 _cx: &mut Context<Self>,
             ) -> impl IntoElement {
                 let texture = Arc::clone(&self.texture);
-                canvas(|_, _, _| (), move |bounds, _, window, _| {
-                    window.paint_surface(
-                        bounds,
-                        texture,
-                        size(DevicePixels(64), DevicePixels(64)),
-                    );
-                })
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, _| {
+                        window.paint_surface(
+                            bounds,
+                            texture,
+                            size(DevicePixels(64), DevicePixels(64)),
+                        );
+                    },
+                )
                 .w(px(64.))
                 .h(px(64.))
             }
@@ -282,13 +285,11 @@ mod tests {
             cx.update_window(window, |_, window, _| {
                 let surfaces = window.painted_surfaces();
                 assert_eq!(surfaces.len(), 1);
-                assert!(
-                    surfaces[0]
-                        .texture
-                        .downcast_ref::<DummyTexture>()
-                        .is_some()
+                assert!(surfaces[0].texture.downcast_ref::<DummyTexture>().is_some());
+                assert_eq!(
+                    surfaces[0].texture_size,
+                    size(DevicePixels(64), DevicePixels(64))
                 );
-                assert_eq!(surfaces[0].texture_size, size(DevicePixels(64), DevicePixels(64)));
             })
             .unwrap();
         }
