@@ -1261,6 +1261,11 @@ enum InputModality {
     Touch,
 }
 
+/// How far the pointer must travel from where keyboard input began before a
+/// mouse move ends keyboard modality. A hand resting on a trackpad or a bumped
+/// mouse jitters by a few pixels and should not hide focus-visible styles.
+const KEYBOARD_MODALITY_MOUSE_SLOP: Pixels = px(8.);
+
 /// Holds the state for a specific window.
 pub struct Window {
     pub(crate) handle: AnyWindowHandle,
@@ -1327,6 +1332,7 @@ pub struct Window {
     #[cfg(feature = "profiler")]
     window_profiler: profiler::WindowProfiler,
     last_input_modality: InputModality,
+    keyboard_modality_mouse_origin: Point<Pixels>,
     pub(crate) refreshing: bool,
     pub(crate) activation_observers: SubscriberSet<(), AnyObserver>,
     pub(crate) focus: Option<FocusId>,
@@ -2023,6 +2029,7 @@ impl Window {
             #[cfg(feature = "profiler")]
             window_profiler: profiler::WindowProfiler::new(handle.window_id())?,
             last_input_modality: InputModality::Mouse,
+            keyboard_modality_mouse_origin: mouse_position,
             refreshing: false,
             activation_observers: SubscriberSet::new(),
             focus: None,
@@ -5794,10 +5801,24 @@ impl Window {
         let old_modality = self.last_input_modality;
         self.last_input_modality = match &event {
             PlatformInput::KeyDown(_) => InputModality::Keyboard,
+            // A drag is deliberate; only an idle pointer gets the slop.
+            PlatformInput::MouseMove(mouse_move)
+                if old_modality == InputModality::Keyboard
+                    && mouse_move.pressed_button.is_none()
+                    && (mouse_move.position - self.keyboard_modality_mouse_origin).magnitude()
+                        <= f64::from(KEYBOARD_MODALITY_MOUSE_SLOP) =>
+            {
+                InputModality::Keyboard
+            }
             PlatformInput::MouseMove(_) | PlatformInput::MouseDown(_) => InputModality::Mouse,
             PlatformInput::Touch(_) => InputModality::Touch,
             _ => self.last_input_modality,
         };
+        if self.last_input_modality == InputModality::Keyboard
+            && old_modality != InputModality::Keyboard
+        {
+            self.keyboard_modality_mouse_origin = self.mouse_position;
+        }
         if self.last_input_modality != old_modality {
             self.refresh();
         }
@@ -8043,6 +8064,36 @@ mod tests {
             test_window.frame_wake_count() > baseline || callback_ran.get(),
             "a frame request with pending next-frame callbacks must either run them or re-arm the frame source"
         );
+    }
+
+    #[gpui::test]
+    fn test_small_mouse_move_keeps_keyboard_modality(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| EmptyView);
+        let cx = &mut crate::VisualTestContext::from_window(window.into(), cx);
+        let is_keyboard = |cx: &mut crate::VisualTestContext| {
+            cx.update(|window, _| window.last_input_was_keyboard())
+        };
+        let origin = point(px(100.), px(100.));
+        cx.simulate_mouse_move(origin, None, crate::Modifiers::default());
+        cx.simulate_keystrokes("a");
+        assert!(is_keyboard(cx));
+
+        cx.simulate_mouse_move(point(px(105.), px(105.)), None, crate::Modifiers::default());
+        assert!(
+            is_keyboard(cx),
+            "jitter within the slop keeps keyboard modality"
+        );
+
+        cx.simulate_mouse_move(
+            point(px(101.), px(101.)),
+            MouseButton::Left,
+            crate::Modifiers::default(),
+        );
+        assert!(!is_keyboard(cx), "a drag ends keyboard modality at once");
+
+        cx.simulate_keystrokes("a");
+        cx.simulate_mouse_move(point(px(110.), px(101.)), None, crate::Modifiers::default());
+        assert!(!is_keyboard(cx), "slop is measured from where typing began");
     }
 
     #[gpui::test]
