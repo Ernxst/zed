@@ -78,6 +78,12 @@ impl TabStopMap {
     pub fn insert(&mut self, focus_handle: &FocusHandle) {
         self.insertion_history
             .push(TabStopOperation::Insert(focus_handle.clone()));
+        // A handle tracked by two elements (a wrapper and the element inside
+        // it) is one tab stop. A second node would make `prev` from the later
+        // node land on the earlier one, so Shift+Tab would not move.
+        if self.by_id.contains_key(&focus_handle.id) {
+            return;
+        }
         let mut path = self.current_path.clone();
         path.0.push(focus_handle.tab_index);
         let order = TabStopNode {
@@ -318,6 +324,24 @@ mod tests {
 
     use crate::{FocusHandle, FocusId, FocusMap, TabStopMap};
     use std::sync::Arc;
+
+    #[test]
+    fn test_handle_tracked_twice_is_one_stop() {
+        let focus_map = Arc::new(FocusMap::default());
+        let mut map = TabStopMap::default();
+        let before = FocusHandle::new(&focus_map).tab_stop(true);
+        let twice = FocusHandle::new(&focus_map).tab_stop(true);
+        let after = FocusHandle::new(&focus_map).tab_stop(true);
+        map.insert(&before);
+        map.insert(&twice);
+        map.insert(&twice);
+        map.insert(&after);
+
+        assert_eq!(map.prev(Some(&twice.id)), Some(before.clone()));
+        assert_eq!(map.next(Some(&twice.id)), Some(after.clone()));
+        assert_eq!(map.prev(Some(&after.id)), Some(twice.clone()));
+        assert_eq!(map.tab_stop_count(), 3);
+    }
 
     #[test]
     fn test_tab_handles() {
