@@ -1244,6 +1244,16 @@ impl Frame {
         let mut blocker_identity: Option<&GlobalElementId> = None;
         let mut scroll_blocked = false;
         for hitbox in self.hitboxes.iter().rev() {
+            if let Some(blocker) = blocker_identity {
+                if hitbox.identity.as_ref().is_some_and(|ancestor| {
+                    ancestor.0.len() < blocker.0.len() && blocker.0.starts_with(ancestor.0.as_ref())
+                }) {
+                    // An absolutely positioned descendant can be hovered
+                    // outside its ancestor's bounds. Ancestry, not spatial
+                    // intersection, determines the ancestor's hover state.
+                    hit_test.hover_ancestor_ids.push(hitbox.id);
+                }
+            }
             if hitbox.behavior == HitboxBehavior::IgnoreMouse {
                 continue;
             }
@@ -1254,14 +1264,6 @@ impl Frame {
                     .iter()
                     .all(|mask| mask.contains(&position))
             {
-                if let Some(blocker) = blocker_identity {
-                    if hitbox.identity.as_ref().is_some_and(|ancestor| {
-                        ancestor.0.len() < blocker.0.len()
-                            && blocker.0.starts_with(ancestor.0.as_ref())
-                    }) {
-                        hit_test.hover_ancestor_ids.push(hitbox.id);
-                    }
-                }
                 if !scroll_blocked {
                     hit_test.ids.push(hitbox.id);
                     if !set_hover_hitbox_count
