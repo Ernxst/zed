@@ -194,7 +194,10 @@ impl TestAppContext {
 
     /// Skip all drawing operations for the duration of this test.
     pub fn skip_drawing(&mut self) {
-        self.app.borrow_mut().mode = GpuiMode::Test { skip_drawing: true };
+        self.app.borrow_mut().mode = GpuiMode::Test {
+            skip_drawing: true,
+            auto_draw: true,
+        };
     }
 
     /// Create a single TestAppContext, for non-multi-client tests

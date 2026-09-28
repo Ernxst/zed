@@ -32,6 +32,14 @@ pub struct VisualTestAppContext {
 }
 
 impl VisualTestAppContext {
+    /// Defer automatic dirty-window draws during a batch of test tasks. The
+    /// caller can draw the window once after the executor has parked.
+    pub fn set_auto_draw(&mut self, enabled: bool) {
+        if let GpuiMode::Test { auto_draw, .. } = &mut self.app.borrow_mut().mode {
+            *auto_draw = enabled;
+        }
+    }
+
     /// Creates a new `VisualTestAppContext` with native platform rendering
     /// but deterministic task scheduling via TestDispatcher.
     ///
