@@ -781,6 +781,9 @@ pub(crate) struct CursorStyleRequest {
 pub(crate) struct HitTest {
     pub(crate) ids: SmallVec<[HitboxId; 8]>,
     pub(crate) hover_hitbox_count: usize,
+    /// Ancestors of the hitbox that blocked hover. They remain hovered even
+    /// though unrelated hitboxes behind that blocker do not.
+    pub(crate) hover_ancestor_ids: SmallVec<[HitboxId; 8]>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -902,7 +905,12 @@ impl HitboxId {
 
     fn hit_test(self, window: &Window) -> bool {
         let hit_test = &window.mouse_hit_test;
-        for id in hit_test.ids.iter().take(hit_test.hover_hitbox_count) {
+        for id in hit_test
+            .ids
+            .iter()
+            .take(hit_test.hover_hitbox_count)
+            .chain(&hit_test.hover_ancestor_ids)
+        {
             if self == *id {
                 return true;
             }
@@ -978,6 +986,7 @@ impl Hitbox {
             .ids
             .iter()
             .take(hit_test.hover_hitbox_count)
+            .chain(&hit_test.hover_ancestor_ids)
             .any(|id| self.id == *id)
     }
 
@@ -1232,7 +1241,19 @@ impl Frame {
     pub(crate) fn hit_test(&self, position: Point<Pixels>) -> HitTest {
         let mut set_hover_hitbox_count = false;
         let mut hit_test = HitTest::default();
+        let mut blocker_identity: Option<&GlobalElementId> = None;
+        let mut scroll_blocked = false;
         for hitbox in self.hitboxes.iter().rev() {
+            if let Some(blocker) = blocker_identity {
+                if hitbox.identity.as_ref().is_some_and(|ancestor| {
+                    ancestor.0.len() < blocker.0.len() && blocker.0.starts_with(ancestor.0.as_ref())
+                }) {
+                    // An absolutely positioned descendant can be hovered
+                    // outside its ancestor's bounds. Ancestry, not spatial
+                    // intersection, determines the ancestor's hover state.
+                    hit_test.hover_ancestor_ids.push(hitbox.id);
+                }
+            }
             if hitbox.behavior == HitboxBehavior::IgnoreMouse {
                 continue;
             }
@@ -1243,15 +1264,21 @@ impl Frame {
                     .iter()
                     .all(|mask| mask.contains(&position))
             {
-                hit_test.ids.push(hitbox.id);
-                if !set_hover_hitbox_count
-                    && hitbox.behavior == HitboxBehavior::BlockMouseExceptScroll
-                {
-                    hit_test.hover_hitbox_count = hit_test.ids.len();
-                    set_hover_hitbox_count = true;
-                }
-                if hitbox.behavior == HitboxBehavior::BlockMouse {
-                    break;
+                if !scroll_blocked {
+                    hit_test.ids.push(hitbox.id);
+                    if !set_hover_hitbox_count
+                        && matches!(
+                            hitbox.behavior,
+                            HitboxBehavior::BlockMouseExceptScroll | HitboxBehavior::BlockMouse
+                        )
+                    {
+                        hit_test.hover_hitbox_count = hit_test.ids.len();
+                        set_hover_hitbox_count = true;
+                        blocker_identity = hitbox.identity.as_ref();
+                    }
+                    if hitbox.behavior == HitboxBehavior::BlockMouse {
+                        scroll_blocked = true;
+                    }
                 }
             }
         }
@@ -3965,6 +3992,28 @@ impl Window {
             hit_test.ids.push(current_hitbox.id);
             if index < old_hit_test.hover_hitbox_count {
                 hit_test.hover_hitbox_count += 1;
+            }
+        }
+
+        for old_id in &old_hit_test.hover_ancestor_ids {
+            let Some(old_hitbox) = self
+                .rendered_frame
+                .hitboxes
+                .iter()
+                .find(|hitbox| hitbox.id == *old_id)
+            else {
+                continue;
+            };
+            let Some(identity) = old_hitbox.identity.as_ref() else {
+                continue;
+            };
+            if let Some(current_hitbox) = self
+                .next_frame
+                .hitboxes
+                .iter()
+                .find(|hitbox| hitbox.identity.as_ref() == Some(identity))
+            {
+                hit_test.hover_ancestor_ids.push(current_hitbox.id);
             }
         }
 
