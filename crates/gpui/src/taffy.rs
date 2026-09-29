@@ -62,7 +62,7 @@ impl LayoutCache {
         input.parent_size.width.unwrap_or(f32::INFINITY).to_bits() & 0x7fff_ffff
     }
 
-    fn get(&self, input: &LayoutInput) -> Option<LayoutOutput> {
+    fn get(&mut self, input: &LayoutInput) -> Option<LayoutOutput> {
         match input.run_mode {
             RunMode::PerformLayout => self.primary.get(input),
             RunMode::ComputeSize => {
@@ -71,7 +71,7 @@ impl LayoutCache {
                     return self.primary.get(input);
                 }
                 self.additional
-                    .iter()
+                    .iter_mut()
                     .find(|(width, _)| *width == parent_width)
                     .and_then(|(_, cache)| cache.get(input))
             }
@@ -240,8 +240,8 @@ impl TraversePartialTree for LayoutRun<'_> {
 }
 
 impl CacheTree for LayoutRun<'_> {
-    fn cache_get(&self, node_id: NodeId, input: &LayoutInput) -> Option<LayoutOutput> {
-        self.tree.node(node_id).cache.get(input)
+    fn cache_get(&mut self, node_id: NodeId, input: &LayoutInput) -> Option<LayoutOutput> {
+        self.tree.node_mut(node_id).cache.get(input)
     }
 
     fn cache_store(&mut self, node_id: NodeId, input: &LayoutInput, output: LayoutOutput) {
@@ -327,7 +327,7 @@ impl LayoutRun<'_> {
                         snap_measured_size_to_device_pixels(measured.size, tree.scale_factor).into()
                     },
                 );
-                output.first_baselines.y = first_baseline;
+                output.baselines = taffy::tree::Baselines::from_first(first_baseline);
                 return output;
             }
 

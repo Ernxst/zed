@@ -91,7 +91,7 @@ smallvec.workspace = true
 stacksafe = { workspace = true, optional = true }
 strum.workspace = true
 sum_tree.workspace = true
-taffy = "=0.13.0"
+taffy = "=0.14.0"
 thiserror.workspace = true
 gpui_util.workspace = true
 hdrhistogram = { workspace = true, optional = true }
