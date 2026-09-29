@@ -1692,6 +1692,54 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Set the given styles when this element's group is focused.
+    fn group_focus(
+        mut self,
+        group_name: impl Into<SharedString>,
+        f: impl FnOnce(StyleRefinement) -> StyleRefinement,
+    ) -> Self
+    where
+        Self: Sized,
+    {
+        self.interactivity().group_focus_style = Some(GroupStyle {
+            group: group_name.into(),
+            style: Box::new(f(StyleRefinement::default())),
+        });
+        self
+    }
+
+    /// Set the given styles when this element's group has keyboard-visible focus.
+    fn group_focus_visible(
+        mut self,
+        group_name: impl Into<SharedString>,
+        f: impl FnOnce(StyleRefinement) -> StyleRefinement,
+    ) -> Self
+    where
+        Self: Sized,
+    {
+        self.interactivity().group_focus_visible_style = Some(GroupStyle {
+            group: group_name.into(),
+            style: Box::new(f(StyleRefinement::default())),
+        });
+        self
+    }
+
+    /// Set the given styles while the group or one of its descendants has focus.
+    fn group_focus_within(
+        mut self,
+        group_name: impl Into<SharedString>,
+        f: impl FnOnce(StyleRefinement) -> StyleRefinement,
+    ) -> Self
+    where
+        Self: Sized,
+    {
+        self.interactivity().group_focus_within_style = Some(GroupStyle {
+            group: group_name.into(),
+            style: Box::new(f(StyleRefinement::default())),
+        });
+        self
+    }
+
     /// Bind the given callback to click events of this element.
     /// The fluent API equivalent to [`Interactivity::on_click`].
     ///
@@ -2278,6 +2326,9 @@ pub struct Interactivity {
     pub(crate) focus_visible_style: Option<Box<StyleRefinement>>,
     pub(crate) hover_style: Option<Box<StyleRefinement>>,
     pub(crate) group_hover_style: Option<GroupStyle>,
+    pub(crate) group_focus_style: Option<GroupStyle>,
+    pub(crate) group_focus_visible_style: Option<GroupStyle>,
+    pub(crate) group_focus_within_style: Option<GroupStyle>,
     pub(crate) active_style: Option<Box<StyleRefinement>>,
     pub(crate) group_active_style: Option<GroupStyle>,
     pub(crate) drag_over_styles: Vec<(
@@ -2542,6 +2593,9 @@ impl Interactivity {
             || self.tracked_focus_handle.is_some()
             || self.hover_style.is_some()
             || self.group_hover_style.is_some()
+            || self.group_focus_style.is_some()
+            || self.group_focus_visible_style.is_some()
+            || self.group_focus_within_style.is_some()
             // `.active(..)` reads `clicked_state`, which `paint_mouse_listeners` only
             // maintains when a hitbox exists. Without this, an active style silently
             // did nothing unless the element also had a click listener or a hover style.
@@ -2738,6 +2792,7 @@ impl Interactivity {
                                                             group,
                                                             hitbox.id,
                                                             global_id.cloned(),
+                                                            self.tracked_focus_handle.clone(),
                                                             cx,
                                                         );
                                                     }
@@ -3669,6 +3724,30 @@ impl Interactivity {
             }
         }
 
+        if let Some(group_focus) = self.group_focus_style.as_ref()
+            && GroupHitboxes::get(&group_focus.group, cx)
+                .and_then(|group| group.focus_handle.clone())
+                .is_some_and(|handle| handle.is_focused(window))
+        {
+            style.refine(&group_focus.style);
+        }
+        if let Some(group_focus_visible) = self.group_focus_visible_style.as_ref()
+            && GroupHitboxes::get(&group_focus_visible.group, cx)
+                .and_then(|group| group.focus_handle.clone())
+                .is_some_and(|handle| {
+                    handle.is_focused(window) && window.last_input_was_keyboard()
+                })
+        {
+            style.refine(&group_focus_visible.style);
+        }
+        if let Some(group_focus_within) = self.group_focus_within_style.as_ref()
+            && GroupHitboxes::get(&group_focus_within.group, cx)
+                .and_then(|group| group.focus_handle.clone())
+                .is_some_and(|handle| handle.contains_focused(window, cx))
+        {
+            style.refine(&group_focus_within.style);
+        }
+
         if !cx.has_active_drag() {
             if let Some(group_hover) = self.group_hover_style.as_ref() {
                 let is_group_hovered = if let Some(group_hitbox) =
@@ -4327,6 +4406,7 @@ fn handle_tooltip_check_visible_and_update(
 pub(crate) struct GroupHitbox {
     id: HitboxId,
     identity: Option<GlobalElementId>,
+    focus_handle: Option<FocusHandle>,
 }
 
 #[derive(Default)]
@@ -4361,6 +4441,7 @@ impl GroupHitboxes {
         name: SharedString,
         hitbox_id: HitboxId,
         identity: Option<GlobalElementId>,
+        focus_handle: Option<FocusHandle>,
         cx: &mut App,
     ) {
         cx.default_global::<Self>()
@@ -4370,6 +4451,7 @@ impl GroupHitboxes {
             .push(GroupHitbox {
                 id: hitbox_id,
                 identity,
+                focus_handle,
             });
     }
 
