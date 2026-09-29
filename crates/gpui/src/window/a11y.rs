@@ -379,6 +379,7 @@ pub(crate) struct A11yNodeBuilder {
     /// This is the exact type required by accesskit, so we can't just make it a
     /// `HashMap<NodeId, Node>` to remove the need for `seen_ids`
     all_nodes: Vec<(NodeId, accesskit::Node)>,
+    pending_controls: Vec<(NodeId, Vec<String>)>,
     seen_ids: FxHashSet<NodeId>,
     /// The node that GPUI considers focused. Note that this may be different to
     /// what is reported to accesskit - see [`Self::active_descendant`]
@@ -398,6 +399,7 @@ impl A11yNodeBuilder {
             ids_stack: SmallVec::new(),
             nodes_stack: SmallVec::new(),
             all_nodes: Vec::new(),
+            pending_controls: Vec::new(),
             seen_ids: FxHashSet::default(),
             focus: None,
             active_descendant: None,
@@ -461,6 +463,12 @@ impl A11yNodeBuilder {
         true
     }
 
+    pub(crate) fn set_controls(&mut self, id: NodeId, controls: Vec<String>) {
+        if !controls.is_empty() {
+            self.pending_controls.push((id, controls));
+        }
+    }
+
     pub(crate) fn current_node_mut(&mut self) -> Option<&mut accesskit::Node> {
         self.nodes_stack.last_mut()
     }
@@ -478,6 +486,7 @@ impl A11yNodeBuilder {
     /// Push the root node to start a new frame.
     fn begin_frame(&mut self, window_title: Option<&SharedString>) {
         self.all_nodes.clear();
+        self.pending_controls.clear();
         self.ids_stack.clear();
         self.nodes_stack.clear();
         self.seen_ids.clear();
@@ -563,6 +572,24 @@ impl A11yNodeBuilder {
         while !self.ids_stack.is_empty() {
             if let (Some(id), Some(node)) = (self.ids_stack.pop(), self.nodes_stack.pop()) {
                 self.all_nodes.push((id, node));
+            }
+        }
+
+        let author_ids: FxHashMap<String, NodeId> = self
+            .all_nodes
+            .iter()
+            .filter_map(|(id, node)| {
+                node.author_id()
+                    .map(|author_id| (author_id.to_owned(), *id))
+            })
+            .collect();
+        for (source_id, controls) in std::mem::take(&mut self.pending_controls) {
+            let control_ids: Vec<NodeId> = controls
+                .iter()
+                .filter_map(|author_id| author_ids.get(author_id).copied())
+                .collect();
+            if let Some((_, source)) = self.all_nodes.iter_mut().find(|(id, _)| *id == source_id) {
+                source.set_controls(control_ids);
             }
         }
 
@@ -790,6 +817,33 @@ mod tests {
 
         let update = builder.finalize();
         assert_eq!(update.focus, focused);
+    }
+
+    #[test]
+    fn controls_resolve_author_ids_after_all_nodes_are_collected() {
+        let mut builder = new_builder();
+        let trigger = NodeId(1);
+        let listbox = NodeId(2);
+
+        let mut trigger_node = accesskit::Node::new(Role::ComboBox);
+        trigger_node.set_author_id("fruit-trigger".to_owned());
+        assert!(builder.push(trigger, trigger_node));
+        builder.set_controls(trigger, vec!["fruit-listbox".to_owned()]);
+        builder.pop();
+
+        let mut listbox_node = accesskit::Node::new(Role::ListBox);
+        listbox_node.set_author_id("fruit-listbox".to_owned());
+        assert!(builder.push(listbox, listbox_node));
+        builder.pop();
+
+        let update = builder.finalize();
+        let trigger_node = &update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == trigger)
+            .unwrap()
+            .1;
+        assert_eq!(trigger_node.controls(), &[listbox]);
     }
 
     #[test]

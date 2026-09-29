@@ -213,6 +213,14 @@ fn node_to_json(
     // Accessibility semantics for this node, grouped together.
     let mut aria = serde_json::Map::new();
     aria.insert("role".into(), json!(format!("{:?}", node.role())));
+    let controls: Vec<&String> = node
+        .controls()
+        .iter()
+        .filter_map(|control| ephemeral.get(control))
+        .collect();
+    if !controls.is_empty() {
+        aria.insert("controls".into(), json!(controls));
+    }
 
     // Which action types the node supports. AccessKit keeps these in a private
     // bitset with no getter or iterator, so we probe each variant. `Action::n`

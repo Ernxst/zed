@@ -1,10 +1,9 @@
 use crate::{
     AnyWindowHandle, Bounds, DevicePixels, DispatchEventResult, GpuSpecs, HeadlessAtlas, Pixels,
-    PlatformAtlas, PlatformDisplay,
-    PlatformHeadlessRenderer, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PromptButton, RequestFrameOptions, Scene, Size, TestPlatform, TextInputConfiguration,
-    TextInputStateChange, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
-    WindowControlArea, WindowInsets, WindowMinSize, WindowParams, WindowVisibility,
+    PlatformAtlas, PlatformDisplay, PlatformHeadlessRenderer, PlatformInput, PlatformInputHandler,
+    PlatformWindow, Point, PromptButton, RequestFrameOptions, Scene, Size, TestPlatform,
+    TextInputConfiguration, TextInputStateChange, WindowAppearance, WindowBackgroundAppearance,
+    WindowBounds, WindowControlArea, WindowInsets, WindowMinSize, WindowParams, WindowVisibility,
 };
 use gpui_util::ResultExt as _;
 #[cfg(any(test, feature = "test-support"))]
