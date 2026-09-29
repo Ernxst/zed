@@ -279,6 +279,9 @@ fn node_to_json(
     if node.is_live_atomic() {
         aria.insert("live_atomic".into(), json!(true));
     }
+    if node.is_modal() {
+        aria.insert("modal".into(), json!(true));
+    }
     if let Some(v) = node.is_expanded() {
         aria.insert("expanded".into(), json!(v));
     }

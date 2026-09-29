@@ -603,6 +603,11 @@ impl FocusHandle {
         }
     }
 
+    /// The stable identifier used to select this handle in a window's focus traversal.
+    pub fn id(&self) -> FocusId {
+        self.id
+    }
+
     pub(crate) fn for_id(id: FocusId, handles: &Arc<FocusMap>) -> Option<Self> {
         let lock = handles.read();
         let focus = lock.get(id)?;
