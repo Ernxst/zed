@@ -4535,6 +4535,10 @@ where
         self.element.write_a11y_info(node);
     }
 
+    fn a11y_controls(&self) -> Option<Vec<String>> {
+        self.element.a11y_controls()
+    }
+
     fn a11y_synthetic_children(
         &mut self,
         prepaint: &mut Self::PrepaintState,
@@ -4900,6 +4904,15 @@ mod tests {
         cell::{Cell, RefCell},
         rc::Weak,
     };
+
+    #[test]
+    fn stateful_element_forwards_a11y_controls() {
+        let element = div()
+            .id("trigger")
+            .aria_controls(["listbox"]);
+
+        assert_eq!(element.a11y_controls(), Some(vec!["listbox".to_owned()]));
+    }
 
     struct GroupHoverTestView {
         render_count: Rc<Cell<usize>>,
