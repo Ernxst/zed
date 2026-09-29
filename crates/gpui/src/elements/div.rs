@@ -1360,6 +1360,15 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Set the author IDs of the elements controlled by this one.
+    fn aria_controls(
+        mut self,
+        controls: impl IntoIterator<Item = impl Into<SharedString>>,
+    ) -> Self {
+        self.interactivity().aria.controls = Some(controls.into_iter().map(Into::into).collect());
+        self
+    }
+
     /// Set the accessible label for this element.
     fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
         self.interactivity().aria.label = Some(label.into());
@@ -2071,6 +2080,14 @@ impl Element for Div {
         self.interactivity.write_a11y_info(node);
     }
 
+    fn a11y_controls(&self) -> Option<Vec<String>> {
+        self.interactivity
+            .aria
+            .controls
+            .as_ref()
+            .map(|controls| controls.iter().map(ToString::to_string).collect())
+    }
+
     fn a11y_synthetic_children(
         &mut self,
         _prepaint: &mut Self::PrepaintState,
@@ -2263,6 +2280,7 @@ impl IntoElement for Div {
 #[derive(Default)]
 pub(crate) struct AriaProperties {
     pub(crate) author_id: Option<SharedString>,
+    pub(crate) controls: Option<Vec<SharedString>>,
     pub(crate) label: Option<SharedString>,
     pub(crate) description: Option<SharedString>,
     pub(crate) keyshortcuts: Option<SharedString>,
@@ -6492,10 +6510,7 @@ mod tests {
         assert!(node.is_required());
         assert_eq!(node.invalid(), Some(accesskit::Invalid::Grammar));
 
-        let mut element = div()
-            .id("field")
-            .aria_read_only(false)
-            .aria_required(false);
+        let mut element = div().id("field").aria_read_only(false).aria_required(false);
         element.interactivity().write_a11y_info(&mut node);
 
         assert!(!node.is_read_only());

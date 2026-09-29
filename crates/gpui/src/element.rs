@@ -121,6 +121,12 @@ pub trait Element: 'static + IntoElement {
     /// See the [accessibility guide](crate::_accessibility) for an overview.
     fn write_a11y_info(&self, _node: &mut accesskit::Node) {}
 
+    /// Return author IDs referenced by this node's `aria-controls` property.
+    /// GPUI resolves these after every node for the frame has been collected.
+    fn a11y_controls(&self) -> Option<Vec<String>> {
+        None
+    }
+
     /// Add synthetic child nodes to an [`Element`] that has an
     /// [`.id()`][Element::id] and a [`.role()`][Element::a11y_role].
     ///
@@ -380,6 +386,11 @@ impl<E: Element> Drawable<E> {
                             self.element.write_a11y_info(&mut node);
                             window.a11y.node_bounds.insert(node_id, bounds);
                             pushed_a11y_node = window.a11y.nodes.push(node_id, node);
+                            if pushed_a11y_node {
+                                if let Some(controls) = self.element.a11y_controls() {
+                                    window.a11y.nodes.set_controls(node_id, controls);
+                                }
+                            }
                             #[cfg(debug_assertions)]
                             if pushed_a11y_node {
                                 let view = window
