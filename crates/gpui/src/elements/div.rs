@@ -1369,6 +1369,12 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Mark this dialog as modal for assistive technology.
+    fn aria_modal(mut self, modal: bool) -> Self {
+        self.interactivity().aria.modal = Some(modal);
+        self
+    }
+
     /// Set the accessible label for this element.
     fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
         self.interactivity().aria.label = Some(label.into());
@@ -2281,6 +2287,7 @@ impl IntoElement for Div {
 pub(crate) struct AriaProperties {
     pub(crate) author_id: Option<SharedString>,
     pub(crate) controls: Option<Vec<SharedString>>,
+    pub(crate) modal: Option<bool>,
     pub(crate) label: Option<SharedString>,
     pub(crate) description: Option<SharedString>,
     pub(crate) keyshortcuts: Option<SharedString>,
@@ -3860,6 +3867,13 @@ impl Interactivity {
     pub(crate) fn write_a11y_info(&self, node: &mut accesskit::Node) {
         if let Some(id) = &self.aria.author_id {
             node.set_author_id(id.to_string());
+        }
+        if let Some(modal) = self.aria.modal {
+            if modal {
+                node.set_modal();
+            } else {
+                node.clear_modal();
+            }
         }
         if let Some(label) = &self.aria.label {
             node.set_label(label.to_string());
@@ -6473,6 +6487,22 @@ mod tests {
 
         assert_eq!(node.live(), Some(accesskit::Live::Polite));
         assert!(node.is_live_atomic());
+    }
+
+    #[test]
+    fn test_aria_modal_builder_sets_and_clears_modal_state() {
+        let mut element = div().id("aria-modal").aria_modal(true);
+        let mut node = accesskit::Node::new(accesskit::Role::Dialog);
+
+        element.interactivity().write_a11y_info(&mut node);
+
+        assert!(node.is_modal());
+
+        let mut element = div().id("aria-modal").aria_modal(false);
+        node.set_modal();
+        element.interactivity().write_a11y_info(&mut node);
+
+        assert!(!node.is_modal());
     }
 
     #[test]

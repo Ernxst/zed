@@ -603,6 +603,11 @@ impl FocusHandle {
         }
     }
 
+    /// The stable identifier used to select this handle in a window's focus traversal.
+    pub fn id(&self) -> FocusId {
+        self.id
+    }
+
     pub(crate) fn for_id(id: FocusId, handles: &Arc<FocusMap>) -> Option<Self> {
         let lock = handles.read();
         let focus = lock.get(id)?;
@@ -2691,6 +2696,36 @@ impl Window {
         }
 
         if let Some(handle) = self.rendered_frame.tab_stops.prev(self.focus.as_ref()) {
+            self.focus(&handle, cx)
+        }
+    }
+
+    /// Move focus to the next painted tab stop accepted by `allowed`.
+    /// Wraps inside that set. Hidden or unpainted handles are already absent
+    /// from the rendered tab map.
+    pub fn focus_next_among(&mut self, allowed: impl FnMut(&FocusId) -> bool, cx: &mut App) {
+        if !self.focus_enabled {
+            return;
+        }
+        if let Some(handle) = self
+            .rendered_frame
+            .tab_stops
+            .next_among(self.focus.as_ref(), allowed)
+        {
+            self.focus(&handle, cx)
+        }
+    }
+
+    /// Move focus to the previous painted tab stop accepted by `allowed`.
+    pub fn focus_prev_among(&mut self, allowed: impl FnMut(&FocusId) -> bool, cx: &mut App) {
+        if !self.focus_enabled {
+            return;
+        }
+        if let Some(handle) = self
+            .rendered_frame
+            .tab_stops
+            .prev_among(self.focus.as_ref(), allowed)
+        {
             self.focus(&handle, cx)
         }
     }
