@@ -6491,14 +6491,14 @@ mod tests {
 
     #[test]
     fn test_aria_modal_builder_sets_and_clears_modal_state() {
-        let mut element = div().aria_modal(true);
+        let mut element = div().id("aria-modal").aria_modal(true);
         let mut node = accesskit::Node::new(accesskit::Role::Dialog);
 
         element.interactivity().write_a11y_info(&mut node);
 
         assert!(node.is_modal());
 
-        let mut element = div().aria_modal(false);
+        let mut element = div().id("aria-modal").aria_modal(false);
         node.set_modal();
         element.interactivity().write_a11y_info(&mut node);
 
