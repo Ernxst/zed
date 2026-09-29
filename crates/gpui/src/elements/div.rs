@@ -1575,6 +1575,12 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Set the sort direction for this column or row header.
+    fn aria_sort(mut self, direction: accesskit::SortDirection) -> Self {
+        self.interactivity().aria.sort_direction = Some(direction);
+        self
+    }
+
     /// Set the row count for this element.
     fn aria_row_count(mut self, count: usize) -> Self {
         self.interactivity().aria.row_count = Some(count);
@@ -2236,6 +2242,7 @@ pub(crate) struct AriaProperties {
     pub(crate) size_of_set: Option<usize>,
     pub(crate) row_index: Option<usize>,
     pub(crate) column_index: Option<usize>,
+    pub(crate) sort_direction: Option<accesskit::SortDirection>,
     pub(crate) row_count: Option<usize>,
     pub(crate) column_count: Option<usize>,
     pub(crate) row_span: Option<usize>,
@@ -3855,6 +3862,9 @@ impl Interactivity {
         }
         if let Some(index) = self.aria.column_index {
             node.set_column_index(index);
+        }
+        if let Some(direction) = self.aria.sort_direction {
+            node.set_sort_direction(direction);
         }
         if let Some(count) = self.aria.row_count {
             node.set_row_count(count);

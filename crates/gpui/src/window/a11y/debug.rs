@@ -326,6 +326,9 @@ fn node_to_json(
     if let Some(v) = node.column_index() {
         aria.insert("column_index".into(), json!(v));
     }
+    if let Some(v) = node.sort_direction() {
+        aria.insert("sort_direction".into(), json!(format!("{v:?}")));
+    }
     if let Some(v) = node.row_count() {
         aria.insert("row_count".into(), json!(v));
     }
