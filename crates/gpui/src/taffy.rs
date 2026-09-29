@@ -1341,13 +1341,15 @@ mod tests {
                 width: 100.,
                 height,
             },
-            TaffySize {
-                width: 80.,
-                height: height - 4.,
+            TaffyRect {
+                left: 0.,
+                right: 80.,
+                top: 0.,
+                bottom: height - 4.,
             },
-            TaffyPoint {
-                x: Some(baseline),
-                y: Some(baseline + 1.),
+            taffy::tree::Baselines {
+                first: Some(baseline),
+                last: Some(baseline + 1.),
             },
         );
         output.top_margin = taffy::tree::CollapsibleMarginSet::from_margin(3.);
@@ -1358,29 +1360,26 @@ mod tests {
 
     #[test]
     fn layout_cache_partitions_compute_size_by_parent_width() {
-        let finite = layout_cache_measure_input(Some(1425.));
-        let unconstrained = layout_cache_measure_input(None);
-        let finite_output = layout_cache_output(11.);
-        let unconstrained_output = layout_cache_output(29.);
+        let inputs = (0..=9)
+            .map(|width| layout_cache_measure_input(Some(1425. + width as f32)))
+            .collect::<Vec<_>>();
+        let outputs = (0..inputs.len())
+            .map(|index| layout_cache_output(11. + index as f32))
+            .collect::<Vec<_>>();
         let mut cache = LayoutCache::default();
         let mut stock = Cache::new();
 
-        cache.store(&finite, finite_output);
-        stock.store(&finite, finite_output);
-        cache.store(&unconstrained, unconstrained_output);
-        stock.store(&unconstrained, unconstrained_output);
+        for (input, output) in inputs.iter().zip(&outputs) {
+            cache.store(input, *output);
+            stock.store(input, *output);
+        }
 
-        assert_eq!(cache.get(&finite), Some(finite_output));
-        assert_eq!(cache.get(&unconstrained), Some(unconstrained_output));
-        assert_eq!(stock.get(&finite), None);
-        assert_eq!(stock.get(&unconstrained), Some(unconstrained_output));
-
-        cache.store(&finite, finite_output);
-        stock.store(&finite, finite_output);
-        assert_eq!(cache.get(&finite), Some(finite_output));
-        assert_eq!(cache.get(&unconstrained), Some(unconstrained_output));
-        assert_eq!(stock.get(&finite), Some(finite_output));
-        assert_eq!(stock.get(&unconstrained), None);
+        assert!(inputs
+            .iter()
+            .zip(&outputs)
+            .all(|(input, output)| cache.get(input) == Some(*output)));
+        assert_eq!(stock.get(&inputs[0]), None);
+        assert_eq!(stock.get(inputs.last().unwrap()), outputs.last().copied());
     }
 
     #[test]
