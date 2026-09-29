@@ -2793,6 +2793,7 @@ impl Interactivity {
                                                             hitbox.id,
                                                             global_id.cloned(),
                                                             self.tracked_focus_handle.clone(),
+                                                            window,
                                                             cx,
                                                         );
                                                     }
@@ -3734,16 +3735,13 @@ impl Interactivity {
         if let Some(group_focus_visible) = self.group_focus_visible_style.as_ref()
             && GroupHitboxes::get(&group_focus_visible.group, cx)
                 .and_then(|group| group.focus_handle.clone())
-                .is_some_and(|handle| {
-                    handle.is_focused(window) && window.last_input_was_keyboard()
-                })
+                .is_some_and(|handle| handle.is_focused(window) && window.last_input_was_keyboard())
         {
             style.refine(&group_focus_visible.style);
         }
         if let Some(group_focus_within) = self.group_focus_within_style.as_ref()
             && GroupHitboxes::get(&group_focus_within.group, cx)
-                .and_then(|group| group.focus_handle.clone())
-                .is_some_and(|handle| handle.contains_focused(window, cx))
+                .is_some_and(|group| group.focus_within)
         {
             style.refine(&group_focus_within.style);
         }
@@ -4407,6 +4405,7 @@ pub(crate) struct GroupHitbox {
     id: HitboxId,
     identity: Option<GlobalElementId>,
     focus_handle: Option<FocusHandle>,
+    focus_within: bool,
 }
 
 #[derive(Default)]
@@ -4442,8 +4441,12 @@ impl GroupHitboxes {
         hitbox_id: HitboxId,
         identity: Option<GlobalElementId>,
         focus_handle: Option<FocusHandle>,
+        window: &Window,
         cx: &mut App,
     ) {
+        let focus_within = focus_handle
+            .as_ref()
+            .is_some_and(|handle| handle.contains_focused(window, cx));
         cx.default_global::<Self>()
             .0
             .entry(name)
@@ -4452,6 +4455,7 @@ impl GroupHitboxes {
                 id: hitbox_id,
                 identity,
                 focus_handle,
+                focus_within,
             });
     }
 
