@@ -37,8 +37,6 @@ use derive_more::{Deref, DerefMut};
 use futures::channel::oneshot;
 use gpui_util::post_inc;
 use gpui_util::{ResultExt, measure};
-use itertools::FoldWhile::{Continue, Done};
-use itertools::Itertools;
 use parking_lot::RwLock;
 use raw_window_handle::{HandleError, HasDisplayHandle, HasWindowHandle};
 use refineable::Refineable;
@@ -1237,18 +1235,28 @@ impl Frame {
     }
 
     pub(crate) fn cursor_style(&self, window: &Window) -> Option<CursorStyle> {
-        self.cursor_styles
-            .iter()
-            .rev()
-            .fold_while(None, |style, request| match request.hitbox_id {
-                None => Done(Some(request.style)),
-                Some(hitbox_id) => Continue(style.or_else(|| {
-                    hitbox_id
-                        .is_hovered_ignoring_last_input(window)
-                        .then_some(request.style)
-                })),
-            })
-            .into_inner()
+        let mut topmost_hitbox_style = None;
+        let mut topmost_hitbox_rank = None;
+        for request in self.cursor_styles.iter().rev() {
+            let Some(hitbox_id) = request.hitbox_id else {
+                return Some(request.style);
+            };
+            if !hitbox_id.is_hovered_ignoring_last_input(window) {
+                continue;
+            }
+            let Some(rank) = self
+                .hit_order
+                .iter()
+                .position(|&index| self.hitboxes[index].id == hitbox_id)
+            else {
+                continue;
+            };
+            if topmost_hitbox_rank.is_none_or(|topmost_rank| rank > topmost_rank) {
+                topmost_hitbox_rank = Some(rank);
+                topmost_hitbox_style = Some(request.style);
+            }
+        }
+        topmost_hitbox_style
     }
 
     pub(crate) fn hit_test(&self, position: Point<Pixels>) -> HitTest {
@@ -9260,6 +9268,54 @@ mod tests {
         cx.simulate_keystrokes("a");
         cx.simulate_mouse_move(point(px(110.), px(101.)), None, crate::Modifiers::default());
         assert!(!is_keyboard(cx), "slop is measured from where typing began");
+    }
+
+    struct ReversedCursorStack;
+
+    impl Render for ReversedCursorStack {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .relative()
+                .child(crate::stacking(
+                    div()
+                        .absolute()
+                        .left(px(0.))
+                        .top(px(0.))
+                        .w(px(80.))
+                        .h(px(80.))
+                        .cursor_crosshair(),
+                    vec![0],
+                    2,
+                    2,
+                    true,
+                ))
+                .child(crate::stacking(
+                    div()
+                        .absolute()
+                        .left(px(0.))
+                        .top(px(0.))
+                        .w(px(80.))
+                        .h(px(80.))
+                        .cursor_text(),
+                    vec![1],
+                    2,
+                    1,
+                    true,
+                ))
+        }
+    }
+
+    #[gpui::test]
+    fn cursor_style_uses_the_topmost_stacked_hitbox(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| ReversedCursorStack);
+        let cx = &mut crate::VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_mouse_move(point(px(20.), px(20.)), None, crate::Modifiers::default());
+
+        assert_eq!(
+            cx.update(|window, _| window.rendered_frame.cursor_style(window)),
+            Some(crate::CursorStyle::Crosshair)
+        );
     }
 
     #[gpui::test]
