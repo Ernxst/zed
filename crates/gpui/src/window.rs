@@ -1330,13 +1330,41 @@ impl Frame {
 
     fn rebuild_hit_order(&mut self) {
         self.hit_order = (0..self.hitboxes.len()).collect();
-        self.hit_order.sort_by_key(|&index| {
-            let hitbox = &self.hitboxes[index];
-            (
-                hitbox.paint_plane,
-                hitbox.stacking_stack.clone(),
-                hitbox.insertion_ordinal,
-            )
+        self.hit_order.sort_by(|&left, &right| {
+            let left_hitbox = &self.hitboxes[left];
+            let right_hitbox = &self.hitboxes[right];
+            let left_identity = left_hitbox.identity.as_ref().map(|identity| &identity.0);
+            let right_identity = right_hitbox.identity.as_ref().map(|identity| &identity.0);
+
+            // A container's hitbox covers its descendants, but the container
+            // must not shield a child merely because its own position places
+            // it in a later paint phase.
+            let descendant_order = match (left_identity, right_identity) {
+                (Some(left), Some(right))
+                    if left.len() < right.len() && right.starts_with(left) =>
+                {
+                    std::cmp::Ordering::Less
+                }
+                (Some(left), Some(right))
+                    if right.len() < left.len() && left.starts_with(right) =>
+                {
+                    std::cmp::Ordering::Greater
+                }
+                _ => std::cmp::Ordering::Equal,
+            };
+
+            descendant_order.then_with(|| {
+                (
+                    left_hitbox.paint_plane,
+                    &left_hitbox.stacking_stack,
+                    left_hitbox.insertion_ordinal,
+                )
+                    .cmp(&(
+                        right_hitbox.paint_plane,
+                        &right_hitbox.stacking_stack,
+                        right_hitbox.insertion_ordinal,
+                    ))
+            })
         });
     }
 }
