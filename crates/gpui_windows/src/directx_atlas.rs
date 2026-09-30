@@ -90,7 +90,7 @@ impl PlatformAtlas for DirectXAtlas {
         bytes: &[u8],
     ) -> anyhow::Result<Option<AtlasTile>> {
         let lock = self.0.lock();
-        if let Some(tile) = lock.tiles_by_key.get(key).copied() {
+        if let Some(tile) = lock.get_tile(key) {
             if tile.bounds.size == size {
                 lock.texture(tile.texture_id)
                     .upload(&lock.device_context, tile.bounds, bytes);
