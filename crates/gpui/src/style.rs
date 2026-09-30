@@ -889,6 +889,7 @@ impl Style {
         cx: &mut App,
         continuation: impl FnOnce(&mut Window, &mut App),
     ) {
+        let previous_paint_phase = window.set_stacking_paint_phase(0);
         #[cfg(debug_assertions)]
         if self.debug_below {
             cx.set_global(DebugBelow)
@@ -998,7 +999,10 @@ impl Style {
 
         window.paint_inset_shadows(shadow_padding_area, padding_corner_radii, &self.box_shadow);
 
+        window.set_stacking_paint_phase(1);
         continuation(window, cx);
+
+        window.set_stacking_paint_phase(2);
 
         if self.is_border_visible() {
             let mut background = self.border_color.unwrap_or_default();
@@ -1033,6 +1037,8 @@ impl Style {
                 BorderStyle::default(),
             ));
         }
+
+        window.set_stacking_paint_phase(previous_paint_phase);
 
         #[cfg(debug_assertions)]
         if self.debug_below {
