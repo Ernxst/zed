@@ -14,6 +14,7 @@ use std::{
     iter::Peekable,
     ops::{Add, Range, Sub},
     slice,
+    sync::{Arc, Weak},
 };
 
 #[allow(non_camel_case_types, unused)]
@@ -76,12 +77,30 @@ pub struct Scene {
     layer_stack: Vec<DrawOrder>,
     stacking_stack: Vec<StackingOrder>,
     slot_owner: Option<StackingOrder>,
-    stacking_boundaries: Vec<(bool, Option<StackingOrder>, Vec<u32>, u8)>,
-    current_source_order: Vec<u32>,
+    stacking_boundaries: Vec<(
+        bool,
+        Option<StackingOrder>,
+        Arc<[u32]>,
+        u8,
+        Arc<[StackingOrder]>,
+        u32,
+    )>,
+    current_source_order: Arc<[u32]>,
+    current_stacking_order: Arc<[StackingOrder]>,
+    stacking_order_id: u32,
+    next_stacking_order_id: u32,
+    next_stacking_order_prune: u32,
+    paint_stacking_order_cache: Option<(u32, u8, u32, Arc<[StackingOrder]>)>,
+    stacking_order_cache: FxHashMap<Vec<StackingOrder>, (u32, Weak<[StackingOrder]>)>,
+    cached_paint_order_groups: Vec<PaintOrderGroupId>,
+    cached_paint_order_stacking: Vec<Arc<[StackingOrder]>>,
     current_stacking_phase: u8,
     paint_phase: u8,
     paint_plane: usize,
     next_paint_ordinal: u64,
+    previous_paint_order: Option<PaintOrderKey>,
+    previous_paint_order_group: Option<PaintOrderGroupId>,
+    paint_order_requires_reordering: bool,
     pub clips: Vec<ClipNode>,
     pub shadows: Vec<Shadow>,
     pub quads: Vec<Quad>,
@@ -97,7 +116,7 @@ pub struct Scene {
 pub(crate) struct StackingState {
     pub(crate) stack: Vec<StackingOrder>,
     pub(crate) slot_owner: Option<StackingOrder>,
-    pub(crate) source_order: Vec<u32>,
+    pub(crate) source_order: Arc<[u32]>,
     pub(crate) phase: u8,
     pub(crate) plane: usize,
 }
@@ -111,11 +130,17 @@ impl Scene {
         self.stacking_stack.clear();
         self.slot_owner = None;
         self.stacking_boundaries.clear();
-        self.current_source_order.clear();
+        self.current_source_order = Arc::from([]);
+        self.current_stacking_order = Arc::from([]);
+        self.stacking_order_id = 0;
         self.current_stacking_phase = 1;
         self.paint_phase = 0;
         self.paint_plane = 0;
         self.next_paint_ordinal = 0;
+        self.previous_paint_order = None;
+        self.previous_paint_order_group = None;
+        self.paint_order_requires_reordering = false;
+        self.refresh_stacking_order();
         self.clips.clear();
         self.paths.clear();
         self.shadows.clear();
@@ -139,7 +164,7 @@ impl Scene {
     }
 
     /// Push an atomic CSS stacking context for primitives inserted until it is popped.
-    pub fn push_stacking_context(&mut self, z_index: i32, source_order: Vec<u32>) {
+    pub fn push_stacking_context(&mut self, z_index: i32, source_order: impl Into<Arc<[u32]>>) {
         self.push_stacking_element(source_order, if z_index < 0 { 0 } else { 2 }, z_index, true);
     }
 
@@ -147,11 +172,12 @@ impl Scene {
     /// retain their source order without trapping descendant contexts.
     pub fn push_stacking_element(
         &mut self,
-        source_order: Vec<u32>,
+        source_order: impl Into<Arc<[u32]>>,
         stacking_phase: u8,
         z_index: i32,
         context: bool,
     ) {
+        let source_order = source_order.into();
         let old_source = std::mem::replace(&mut self.current_source_order, source_order.clone());
         let old_slot_owner = self.slot_owner.take();
         self.stacking_boundaries.push((
@@ -159,6 +185,8 @@ impl Scene {
             old_slot_owner.clone(),
             old_source,
             self.current_stacking_phase,
+            self.current_stacking_order.clone(),
+            self.stacking_order_id,
         ));
         self.current_stacking_phase = stacking_phase;
         if context {
@@ -179,22 +207,27 @@ impl Scene {
         } else {
             self.slot_owner = old_slot_owner;
         }
+        self.refresh_stacking_order();
     }
 
     /// Push a source-order boundary without creating a stacking context.
-    pub fn push_stacking_container(&mut self, source_order: Vec<u32>) {
+    pub fn push_stacking_container(&mut self, source_order: impl Into<Arc<[u32]>>) {
         self.push_stacking_element(source_order, 1, 0, false);
     }
 
     /// Pop the most recently pushed stacking boundary.
     pub fn pop_stacking_order(&mut self) {
-        if let Some((context, slot_owner, source_order, phase)) = self.stacking_boundaries.pop() {
+        if let Some((context, slot_owner, source_order, phase, stacking_order, stacking_order_id)) =
+            self.stacking_boundaries.pop()
+        {
             if context {
                 self.stacking_stack.pop();
             }
             self.current_source_order = source_order;
             self.current_stacking_phase = phase;
             self.slot_owner = slot_owner;
+            self.current_stacking_order = stacking_order;
+            self.stacking_order_id = stacking_order_id;
         }
     }
 
@@ -211,7 +244,7 @@ impl Scene {
         self.paint_plane
     }
 
-    pub(crate) fn current_stacking_order(&self) -> Vec<StackingOrder> {
+    fn refresh_stacking_order(&mut self) {
         let mut order = self.stacking_stack.clone();
         if let Some(slot_owner) = &self.slot_owner {
             order.push(slot_owner.clone());
@@ -221,7 +254,62 @@ impl Scene {
             z_index: 0,
             source_order: self.current_source_order.clone(),
         });
-        order
+        let (current, order_id) = self.intern_stacking_order(order);
+        self.current_stacking_order = current;
+        self.stacking_order_id = order_id;
+    }
+
+    fn intern_stacking_order(&mut self, order: Vec<StackingOrder>) -> (Arc<[StackingOrder]>, u32) {
+        if self.stacking_order_cache.len() > 4096
+            && self.next_stacking_order_id >= self.next_stacking_order_prune
+        {
+            self.stacking_order_cache
+                .retain(|_, (_, cached)| cached.strong_count() > 0);
+            self.next_stacking_order_prune = self.next_stacking_order_id.wrapping_add(1024);
+        }
+        if let Some((order_id, cached)) = self.stacking_order_cache.get_mut(&order) {
+            if let Some(current) = cached.upgrade() {
+                return (current, *order_id);
+            }
+            let current: Arc<[StackingOrder]> = Arc::from(order.clone());
+            *cached = Arc::downgrade(&current);
+            return (current, *order_id);
+        }
+        let current: Arc<[StackingOrder]> = Arc::from(order.clone());
+        let order_id = self.next_stacking_order_id;
+        self.next_stacking_order_id = self.next_stacking_order_id.wrapping_add(1);
+        self.stacking_order_cache
+            .insert(order, (order_id, Arc::downgrade(&current)));
+        (current, order_id)
+    }
+
+    fn current_paint_stacking_order(&mut self) -> (Arc<[StackingOrder]>, u32) {
+        if self.slot_owner.is_none() {
+            return (self.current_stacking_order.clone(), self.stacking_order_id);
+        }
+        if let Some((current_id, phase, order_id, order)) = &self.paint_stacking_order_cache
+            && *current_id == self.stacking_order_id
+            && *phase == self.paint_phase
+        {
+            return (order.clone(), *order_id);
+        }
+
+        let mut order = self.current_stacking_order.to_vec();
+        if let Some(current) = order.last_mut() {
+            current.phase = self.paint_phase;
+        }
+        let (order, order_id) = self.intern_stacking_order(order);
+        self.paint_stacking_order_cache = Some((
+            self.stacking_order_id,
+            self.paint_phase,
+            order_id,
+            order.clone(),
+        ));
+        (order, order_id)
+    }
+
+    pub(crate) fn current_stacking_order(&self) -> Arc<[StackingOrder]> {
+        self.current_stacking_order.clone()
     }
 
     pub(crate) fn stacking_state(&self) -> StackingState {
@@ -235,45 +323,52 @@ impl Scene {
     }
 
     pub(crate) fn rebase_stacking_order(
-        order: &mut Vec<StackingOrder>,
+        order: &mut Arc<[StackingOrder]>,
         old_state: &StackingState,
         new_state: &StackingState,
     ) {
+        let mut order_vec = order.to_vec();
         let mut old_base = old_state.stack.clone();
         old_base.extend(old_state.slot_owner.iter().cloned());
         let mut new_base = new_state.stack.clone();
         new_base.extend(new_state.slot_owner.iter().cloned());
-        if !order.starts_with(&old_base) {
+        if !order_vec.starts_with(&old_base) {
             old_base.clone_from(&old_state.stack);
             new_base.clone_from(&new_state.stack);
         }
         let mut rebased = new_base;
-        rebased.extend(order.iter().skip(old_base.len()).cloned().map(|mut entry| {
-            entry.source_order = rebase_source_order(
-                &entry.source_order,
-                &old_state.source_order,
-                &new_state.source_order,
-            );
-            if entry.phase == old_state.phase {
-                entry.phase = new_state.phase;
-            }
-            entry
-        }));
-        *order = rebased;
+        rebased.extend(
+            order_vec
+                .iter()
+                .skip(old_base.len())
+                .cloned()
+                .map(|mut entry| {
+                    entry.source_order = rebase_source_order(
+                        &entry.source_order,
+                        &old_state.source_order,
+                        &new_state.source_order,
+                    );
+                    if entry.phase == old_state.phase {
+                        entry.phase = new_state.phase;
+                    }
+                    entry
+                }),
+        );
+        *order = Arc::from(rebased);
     }
 
     /// Return the current paint-order key for a non-primitive paint registry.
     /// The key follows the same stacking context, source order and paint phase
     /// used by [`Scene::finish`].
     pub fn current_paint_order_key(&self) -> PaintOrderKey {
-        let mut stacking = self.current_stacking_order();
-        let phase = if self.slot_owner.is_some() {
+        let (stacking, phase) = if self.slot_owner.is_some() {
+            let mut stacking = self.current_stacking_order.to_vec();
             if let Some(current) = stacking.last_mut() {
                 current.phase = self.paint_phase;
             }
-            0
+            (Arc::from(stacking), 0)
         } else {
-            self.paint_phase
+            (self.current_stacking_order.clone(), self.paint_phase)
         };
         PaintOrderKey {
             plane: self.paint_plane,
@@ -308,7 +403,27 @@ impl Scene {
     }
 
     pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
-        let mut primitive = primitive.into();
+        if self.current_stacking_order.is_empty() {
+            self.refresh_stacking_order();
+        }
+        let (stacking, stacking_order_id) = self.current_paint_stacking_order();
+        self.insert_primitive_with_stacking(
+            primitive.into(),
+            stacking,
+            stacking_order_id,
+            self.paint_plane,
+            self.paint_phase,
+        );
+    }
+
+    fn insert_primitive_with_stacking(
+        &mut self,
+        mut primitive: Primitive,
+        stacking: Arc<[StackingOrder]>,
+        stacking_order_id: u32,
+        plane: usize,
+        phase: u8,
+    ) {
         let clipped_bounds = primitive
             .bounds()
             .intersect(&self.clip_folded_bounds(primitive.clip_id()));
@@ -359,15 +474,36 @@ impl Scene {
         }
         let ordinal = self.next_paint_ordinal;
         self.next_paint_ordinal = self.next_paint_ordinal.wrapping_add(1);
+        let paint_order_group = PaintOrderGroupId {
+            plane,
+            stacking_order: stacking_order_id,
+            phase,
+        };
+        // Ordinals increase within a group, so only a transition can make
+        // this primitive sort before the previous one.
+        if self.previous_paint_order_group != Some(paint_order_group) {
+            let paint_order = PaintOrderKey {
+                plane,
+                stacking: stacking.clone(),
+                phase,
+                ordinal,
+            };
+            if self
+                .previous_paint_order
+                .as_ref()
+                .is_some_and(|previous| paint_order.cmp(previous).is_lt())
+            {
+                self.paint_order_requires_reordering = true;
+            }
+            self.previous_paint_order = Some(paint_order);
+            self.previous_paint_order_group = Some(paint_order_group);
+        }
         self.paint_operations.push(PaintOperation::Primitive {
             primitive,
-            stacking_stack: self.stacking_stack.clone(),
-            slot_owner: self.slot_owner.clone(),
-            source_order: self.current_source_order.clone(),
-            stacking_phase: self.current_stacking_phase,
-            plane: self.paint_plane,
-            phase: self.paint_phase,
-            ordinal,
+            stacking,
+            stacking_order_id,
+            plane,
+            phase,
         });
     }
 
@@ -382,14 +518,12 @@ impl Scene {
         // so the referenced nodes (and their rounded-clip chains) must be copied into
         // this scene and the ids rewritten.
         let mut clip_id_map = FxHashMap::default();
+        let mut stacking_order_map = FxHashMap::<usize, (Arc<[StackingOrder]>, u32)>::default();
         for operation in &prev_scene.paint_operations[range] {
             match operation {
                 PaintOperation::Primitive {
                     primitive,
-                    stacking_stack,
-                    slot_owner,
-                    source_order,
-                    stacking_phase,
+                    stacking,
                     plane,
                     phase,
                     ..
@@ -398,60 +532,29 @@ impl Scene {
                     let clip_id =
                         self.import_clip(prev_scene, primitive.clip_id(), &mut clip_id_map);
                     *primitive.clip_id_mut() = clip_id;
-                    let stacking_len = self.stacking_stack.len();
-                    self.stacking_stack.extend(
-                        stacking_stack
-                            .iter()
-                            .skip(old_state.stack.len())
-                            .cloned()
-                            .map(|mut entry| {
-                                entry.source_order = rebase_source_order(
-                                    &entry.source_order,
-                                    &old_state.source_order,
-                                    &new_state.source_order,
-                                );
-                                entry
-                            }),
-                    );
-                    let old_source = std::mem::replace(
-                        &mut self.current_source_order,
-                        rebase_source_order(
-                            source_order,
-                            &old_state.source_order,
-                            &new_state.source_order,
-                        ),
-                    );
-                    let old_slot_owner = self.slot_owner.clone();
-                    let mut new_slot_owner = slot_owner.clone();
-                    if let Some(slot) = &mut new_slot_owner {
-                        slot.source_order = rebase_source_order(
-                            &slot.source_order,
-                            &old_state.source_order,
-                            &new_state.source_order,
-                        );
-                    }
-                    self.slot_owner = new_slot_owner;
-                    let old_stacking_phase = self.current_stacking_phase;
-                    self.current_stacking_phase = if *stacking_phase == old_state.phase {
-                        new_state.phase
-                    } else {
-                        *stacking_phase
-                    };
-                    let old_phase = self.paint_phase;
-                    self.paint_phase = *phase;
-                    let old_plane = self.paint_plane;
-                    self.paint_plane = if *plane == old_state.plane {
+                    let stacking_key = Arc::as_ptr(stacking) as *const StackingOrder as usize;
+                    let (rebased_stacking, stacking_order_id) =
+                        if let Some(rebased) = stacking_order_map.get(&stacking_key) {
+                            rebased.clone()
+                        } else {
+                            let mut rebased = stacking.clone();
+                            Self::rebase_stacking_order(&mut rebased, old_state, new_state);
+                            let (rebased, order_id) = self.intern_stacking_order(rebased.to_vec());
+                            stacking_order_map.insert(stacking_key, (rebased.clone(), order_id));
+                            (rebased, order_id)
+                        };
+                    let plane = if *plane == old_state.plane {
                         new_state.plane
                     } else {
                         *plane
                     };
-                    self.insert_primitive(primitive);
-                    self.paint_plane = old_plane;
-                    self.paint_phase = old_phase;
-                    self.current_source_order = old_source;
-                    self.current_stacking_phase = old_stacking_phase;
-                    self.slot_owner = old_slot_owner;
-                    self.stacking_stack.truncate(stacking_len);
+                    self.insert_primitive_with_stacking(
+                        primitive,
+                        rebased_stacking,
+                        stacking_order_id,
+                        plane,
+                        *phase,
+                    );
                 }
                 PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
                 PaintOperation::EndLayer => self.pop_layer(),
@@ -491,53 +594,69 @@ impl Scene {
     }
 
     pub fn finish(&mut self) {
-        if self.paint_operations.iter().any(|operation| {
-            matches!(operation, PaintOperation::Primitive { stacking_stack, slot_owner, plane, .. } if !stacking_stack.is_empty() || slot_owner.is_some() || *plane != 0)
-        }) {
-            let mut ordered = self
-                .paint_operations
+        if self.paint_order_requires_reordering {
+            let mut groups = Vec::<Vec<usize>>::new();
+            let mut group_ids = Vec::<PaintOrderGroupId>::new();
+            let mut group_stacking = Vec::<Arc<[StackingOrder]>>::new();
+            let mut group_indices = FxHashMap::<PaintOrderGroupId, usize>::default();
+            for (index, operation) in self.paint_operations.iter().enumerate() {
+                let PaintOperation::Primitive {
+                    stacking,
+                    stacking_order_id,
+                    plane,
+                    phase,
+                    ..
+                } = operation
+                else {
+                    continue;
+                };
+                let id = PaintOrderGroupId {
+                    plane: *plane,
+                    stacking_order: *stacking_order_id,
+                    phase: *phase,
+                };
+                let group_index = *group_indices.entry(id).or_insert_with(|| {
+                    let group_index = groups.len();
+                    groups.push(Vec::new());
+                    group_ids.push(id);
+                    group_stacking.push(stacking.clone());
+                    group_index
+                });
+                groups[group_index].push(index);
+            }
+
+            let cached_order_is_current = self.cached_paint_order_groups.len() == groups.len()
+                && self.cached_paint_order_stacking.len() == groups.len()
+                && self
+                    .cached_paint_order_groups
+                    .iter()
+                    .all(|group| group_indices.contains_key(group));
+            if !cached_order_is_current {
+                let mut sorted_groups = (0..groups.len()).collect::<Vec<_>>();
+                sorted_groups.sort_by(|&left, &right| {
+                    let left_id = group_ids[left];
+                    let right_id = group_ids[right];
+                    left_id
+                        .plane
+                        .cmp(&right_id.plane)
+                        .then_with(|| group_stacking[left].cmp(&group_stacking[right]))
+                        .then_with(|| left_id.phase.cmp(&right_id.phase))
+                });
+                self.cached_paint_order_groups = sorted_groups
+                    .iter()
+                    .map(|&index| group_ids[index])
+                    .collect();
+                self.cached_paint_order_stacking = sorted_groups
+                    .iter()
+                    .map(|&index| group_stacking[index].clone())
+                    .collect();
+            }
+
+            let ordered = self
+                .cached_paint_order_groups
                 .iter()
-                .enumerate()
-                .filter_map(|(index, operation)| match operation {
-                    PaintOperation::Primitive {
-                        stacking_stack,
-                        slot_owner,
-                        source_order,
-                        stacking_phase,
-                        plane,
-                        phase,
-                        ordinal,
-                        ..
-                    } => Some((
-                        PaintOrderKey {
-                            plane: *plane,
-                            stacking: {
-                                let mut stacking = stacking_stack.clone();
-                                if let Some(slot_owner) = slot_owner {
-                                    stacking.push(slot_owner.clone());
-                                    stacking.push(StackingOrder {
-                                        phase: *phase,
-                                        z_index: 0,
-                                        source_order: source_order.clone(),
-                                    });
-                                } else {
-                                    stacking.push(StackingOrder {
-                                        phase: *stacking_phase,
-                                        z_index: 0,
-                                        source_order: source_order.clone(),
-                                    });
-                                }
-                                stacking
-                            },
-                            phase: *phase,
-                            ordinal: *ordinal,
-                        },
-                        index,
-                    )),
-                    PaintOperation::StartLayer(_) | PaintOperation::EndLayer => None,
-                })
+                .flat_map(|group| groups[group_indices[group]].iter().copied())
                 .collect::<Vec<_>>();
-            ordered.sort_by(|a, b| a.0.cmp(&b.0));
 
             let mut bounds = BoundsTree::default();
             self.shadows.clear();
@@ -549,22 +668,20 @@ impl Scene {
             self.polychrome_sprites.clear();
             self.surfaces.clear();
             let clips = self.clips.clone();
-            for (_, index) in ordered {
-                let PaintOperation::Primitive { primitive, .. } =
-                    &mut self.paint_operations[index]
+            for index in ordered {
+                let PaintOperation::Primitive { primitive, .. } = &mut self.paint_operations[index]
                 else {
                     unreachable!()
                 };
                 let clip_id = primitive.clip_id();
-                let clip_bounds = clips.get(clip_id as usize).map(|node| node.folded_bounds).unwrap_or_else(|| Bounds {
-                    origin: point(ScaledPixels(-1e15), ScaledPixels(-1e15)),
-                    size: size(ScaledPixels(2e15), ScaledPixels(2e15)),
-                });
-                let order = bounds.insert(
-                    primitive
-                        .bounds()
-                        .intersect(&clip_bounds),
-                );
+                let clip_bounds = clips
+                    .get(clip_id as usize)
+                    .map(|node| node.folded_bounds)
+                    .unwrap_or_else(|| Bounds {
+                        origin: point(ScaledPixels(-1e15), ScaledPixels(-1e15)),
+                        size: size(ScaledPixels(2e15), ScaledPixels(2e15)),
+                    });
+                let order = bounds.insert(primitive.bounds().intersect(&clip_bounds));
                 primitive.set_order(order);
                 match primitive {
                     Primitive::Shadow(shadow) => self.shadows.push(*shadow),
@@ -574,9 +691,7 @@ impl Scene {
                         self.paths.push(path.clone());
                     }
                     Primitive::Underline(underline) => self.underlines.push(*underline),
-                    Primitive::MonochromeSprite(sprite) => {
-                        self.monochrome_sprites.push(*sprite)
-                    }
+                    Primitive::MonochromeSprite(sprite) => self.monochrome_sprites.push(*sprite),
                     Primitive::SubpixelSprite(sprite) => self.subpixel_sprites.push(*sprite),
                     Primitive::PolychromeSprite(sprite) => self.polychrome_sprites.push(*sprite),
                     Primitive::Surface(surface) => self.surfaces.push(surface.clone()),
@@ -622,31 +737,40 @@ impl Scene {
     }
 }
 
-fn rebase_source_order(source_order: &[u32], old: &[u32], new: &[u32]) -> Vec<u32> {
+fn rebase_source_order(source_order: &[u32], old: &[u32], new: &[u32]) -> Arc<[u32]> {
     if source_order.starts_with(old) {
-        new.iter()
-            .chain(source_order[old.len()..].iter())
-            .copied()
-            .collect()
+        Arc::from(
+            new.iter()
+                .chain(source_order[old.len()..].iter())
+                .copied()
+                .collect::<Vec<_>>(),
+        )
     } else {
-        source_order.to_vec()
+        Arc::from(source_order)
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(crate) struct StackingOrder {
     phase: u8,
     z_index: i32,
-    source_order: Vec<u32>,
+    source_order: Arc<[u32]>,
 }
 
 /// A paint-order position suitable for resolving overlap in a non-scene registry.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct PaintOrderKey {
     plane: usize,
-    stacking: Vec<StackingOrder>,
+    stacking: Arc<[StackingOrder]>,
     phase: u8,
     ordinal: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+struct PaintOrderGroupId {
+    plane: usize,
+    stacking_order: u32,
+    phase: u8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Default)]
@@ -672,13 +796,10 @@ pub(crate) enum PrimitiveKind {
 pub(crate) enum PaintOperation {
     Primitive {
         primitive: Primitive,
-        stacking_stack: Vec<StackingOrder>,
-        slot_owner: Option<StackingOrder>,
-        source_order: Vec<u32>,
-        stacking_phase: u8,
+        stacking: Arc<[StackingOrder]>,
+        stacking_order_id: u32,
         plane: usize,
         phase: u8,
-        ordinal: u64,
     },
     StartLayer(Bounds<ScaledPixels>),
     EndLayer,
@@ -1599,6 +1720,97 @@ mod tests {
     }
 
     #[test]
+    fn scene_finish_skips_reordering_when_paint_order_is_already_monotonic() {
+        let mut scene = Scene::default();
+        let clip_id = scene.insert_clip(ClipNode {
+            folded_bounds: bounds(0., 0., 100., 100.),
+            rounded_bounds: Default::default(),
+            corner_radii: Default::default(),
+            rounded_head: ClipNode::NONE,
+            parent_rounded: ClipNode::NONE,
+        });
+        scene.push_stacking_container(vec![0]);
+        scene.insert_primitive(quad(clip_id, bounds(0., 0., 10., 10.)));
+        scene.pop_stacking_order();
+        scene.push_stacking_container(vec![1]);
+        scene.insert_primitive(quad(clip_id, bounds(0., 0., 10., 10.)));
+        scene.pop_stacking_order();
+
+        assert!(!scene.paint_order_requires_reordering);
+        scene.finish();
+        let source_orders = scene
+            .paint_operations
+            .iter()
+            .filter_map(|operation| match operation {
+                PaintOperation::Primitive { stacking, .. } => {
+                    Some(stacking.last().unwrap().source_order.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            source_orders
+                .iter()
+                .map(|order| order.as_ref().to_vec())
+                .collect::<Vec<_>>(),
+            [vec![0], vec![1]]
+        );
+        assert!(scene.cached_paint_order_groups.is_empty());
+    }
+
+    #[test]
+    fn consecutive_primitives_in_one_group_reuse_the_previous_order_key() {
+        let mut scene = Scene::default();
+        let clip_id = scene.insert_clip(ClipNode {
+            folded_bounds: bounds(0., 0., 100., 100.),
+            rounded_bounds: Default::default(),
+            corner_radii: Default::default(),
+            rounded_head: ClipNode::NONE,
+            parent_rounded: ClipNode::NONE,
+        });
+
+        scene.insert_primitive(quad(clip_id, bounds(0., 0., 10., 10.)));
+        scene.insert_primitive(quad(clip_id, bounds(10., 0., 10., 10.)));
+
+        assert_eq!(scene.next_paint_ordinal, 2);
+        assert_eq!(
+            scene.previous_paint_order.as_ref().unwrap().ordinal,
+            0,
+            "the unchanged group should not rebuild the comparison key"
+        );
+    }
+
+    #[test]
+    fn scene_finish_reuses_sorted_stacking_groups_after_clear() {
+        let mut scene = Scene::default();
+        let record_primitives = |scene: &mut Scene| {
+            let clip_id = scene.insert_clip(ClipNode {
+                folded_bounds: bounds(0., 0., 100., 100.),
+                rounded_bounds: Default::default(),
+                corner_radii: Default::default(),
+                rounded_head: ClipNode::NONE,
+                parent_rounded: ClipNode::NONE,
+            });
+            scene.push_stacking_context(2, vec![0]);
+            scene.insert_primitive(quad(clip_id, bounds(0., 0., 10., 10.)));
+            scene.pop_stacking_order();
+            scene.push_stacking_context(-1, vec![1]);
+            scene.insert_primitive(quad(clip_id, bounds(0., 0., 10., 10.)));
+            scene.pop_stacking_order();
+        };
+
+        record_primitives(&mut scene);
+        scene.finish();
+        let cached_order = scene.cached_paint_order_groups.clone();
+        assert_eq!(cached_order.len(), 2);
+
+        scene.clear();
+        record_primitives(&mut scene);
+        scene.finish();
+        assert_eq!(scene.cached_paint_order_groups, cached_order);
+    }
+
+    #[test]
     fn scene_finish_sorts_each_contexts_decoration_content_and_outline_phases() {
         let mut scene = Scene::default();
         let clip_id = scene.insert_clip(ClipNode {
@@ -1823,19 +2035,15 @@ mod tests {
         let new_state = next.stacking_state();
         next.replay(0..previous.len(), &previous, &old_state, &new_state);
 
-        let PaintOperation::Primitive {
-            stacking_stack,
-            source_order,
-            ..
-        } = next.paint_operations.last().unwrap()
+        let PaintOperation::Primitive { stacking, .. } = next.paint_operations.last().unwrap()
         else {
             panic!("replayed primitive should remain the final paint operation");
         };
-        assert_eq!(stacking_stack.len(), 2);
-        assert_eq!(stacking_stack[0].z_index, 3);
-        assert_eq!(stacking_stack[0].source_order, [4]);
-        assert_eq!(stacking_stack[1].z_index, 5);
-        assert_eq!(stacking_stack[1].source_order, [4, 0]);
-        assert_eq!(source_order, &[4, 0]);
+        assert_eq!(stacking.len(), 3);
+        assert_eq!(stacking[0].z_index, 3);
+        assert_eq!(stacking[0].source_order.as_ref(), [4]);
+        assert_eq!(stacking[1].z_index, 5);
+        assert_eq!(stacking[1].source_order.as_ref(), [4, 0]);
+        assert_eq!(stacking[2].source_order.as_ref(), [4, 0]);
     }
 }
