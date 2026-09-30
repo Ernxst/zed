@@ -2,11 +2,12 @@ use crate::{
     AnyElement, App, Bounds, Element, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
     Pixels, Window,
 };
+use std::sync::Arc;
 
 /// Paints an element inside a CSS stacking boundary while keeping element traversal unchanged.
 pub struct Stacking {
     child: AnyElement,
-    source_order: Vec<u32>,
+    source_order: Arc<[u32]>,
     stacking_phase: u8,
     z_index: i32,
     context: bool,
@@ -15,14 +16,14 @@ pub struct Stacking {
 /// Wrap an element with its retained source-order token and stacking behaviour.
 pub fn stacking(
     child: impl IntoElement,
-    source_order: Vec<u32>,
+    source_order: impl Into<Arc<[u32]>>,
     stacking_phase: u8,
     z_index: i32,
     context: bool,
 ) -> Stacking {
     Stacking {
         child: child.into_any_element(),
-        source_order,
+        source_order: source_order.into(),
         stacking_phase,
         z_index,
         context,

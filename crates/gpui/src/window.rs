@@ -958,9 +958,26 @@ pub struct Hitbox {
     /// Flags that specify hitbox behavior.
     pub behavior: HitboxBehavior,
     identity: Option<GlobalElementId>,
-    pub(crate) stacking_stack: Vec<crate::scene::StackingOrder>,
+    pub(crate) stacking_stack: std::sync::Arc<[crate::scene::StackingOrder]>,
     pub(crate) paint_plane: usize,
     pub(crate) insertion_ordinal: u64,
+}
+
+#[derive(Clone)]
+struct HitboxOrderKey {
+    identity: Option<GlobalElementId>,
+    stacking_stack: std::sync::Arc<[crate::scene::StackingOrder]>,
+    paint_plane: usize,
+    insertion_ordinal: u64,
+}
+
+impl HitboxOrderKey {
+    fn matches(&self, hitbox: &Hitbox) -> bool {
+        self.identity == hitbox.identity
+            && std::sync::Arc::ptr_eq(&self.stacking_stack, &hitbox.stacking_stack)
+            && self.paint_plane == hitbox.paint_plane
+            && self.insertion_ordinal == hitbox.insertion_ordinal
+    }
 }
 
 impl Hitbox {
@@ -1123,6 +1140,9 @@ pub(crate) struct Frame {
     pub(crate) scene: Scene,
     pub(crate) hitboxes: Vec<Hitbox>,
     hit_order: Vec<usize>,
+    hit_order_cache: Vec<usize>,
+    hit_order_keys: Vec<HitboxOrderKey>,
+    hit_order_dirty: bool,
     pub(crate) window_control_hitboxes: Vec<(WindowControlArea, Hitbox)>,
     pub(crate) deferred_draws: Vec<DeferredDraw>,
     pub(crate) input_handlers: Vec<Option<PlatformInputHandler>>,
@@ -1184,6 +1204,9 @@ impl Frame {
             scene: Scene::default(),
             hitboxes: Vec::new(),
             hit_order: Vec::new(),
+            hit_order_cache: Vec::new(),
+            hit_order_keys: Vec::new(),
+            hit_order_dirty: false,
             window_control_hitboxes: Vec::new(),
             deferred_draws: Vec::new(),
             input_handlers: Vec::new(),
@@ -1216,6 +1239,7 @@ impl Frame {
         self.cursor_styles.clear();
         self.hitboxes.clear();
         self.hit_order.clear();
+        self.hit_order_dirty = true;
         self.window_control_hitboxes.clear();
         self.deferred_draws.clear();
         self.tab_stops.clear();
@@ -1337,6 +1361,20 @@ impl Frame {
     }
 
     fn rebuild_hit_order(&mut self) {
+        if !self.hit_order_dirty {
+            return;
+        }
+        if self.hitboxes.len() == self.hit_order_keys.len()
+            && self
+                .hitboxes
+                .iter()
+                .zip(&self.hit_order_keys)
+                .all(|(hitbox, key)| key.matches(hitbox))
+        {
+            self.hit_order.clone_from(&self.hit_order_cache);
+            self.hit_order_dirty = false;
+            return;
+        }
         self.hit_order = (0..self.hitboxes.len()).collect();
         self.hit_order.sort_by(|&left, &right| {
             let left_hitbox = &self.hitboxes[left];
@@ -1374,6 +1412,18 @@ impl Frame {
                     ))
             })
         });
+        self.hit_order_keys = self
+            .hitboxes
+            .iter()
+            .map(|hitbox| HitboxOrderKey {
+                identity: hitbox.identity.clone(),
+                stacking_stack: hitbox.stacking_stack.clone(),
+                paint_plane: hitbox.paint_plane,
+                insertion_ordinal: hitbox.insertion_ordinal,
+            })
+            .collect();
+        self.hit_order_cache.clone_from(&self.hit_order);
+        self.hit_order_dirty = false;
     }
 }
 
@@ -4465,22 +4515,36 @@ impl Window {
     pub(crate) fn reuse_prepaint(&mut self, range: Range<PrepaintStateIndex>) {
         let new_stacking_state = self.next_frame.scene.stacking_state();
         let mut insertion_ordinal = self.next_frame.hitboxes.len() as u64;
+        let mut rebased_stacking_orders =
+            FxHashMap::<usize, Arc<[crate::scene::StackingOrder]>>::default();
         self.next_frame.hitboxes.extend(
             self.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index]
                 .iter()
                 .cloned()
                 .map(|mut hitbox| {
-                    Scene::rebase_stacking_order(
-                        &mut hitbox.stacking_stack,
-                        &range.start.stacking_state,
-                        &new_stacking_state,
-                    );
+                    let old_order_id = Arc::as_ptr(&hitbox.stacking_stack) as *const () as usize;
+                    hitbox.stacking_stack = if let Some(order) =
+                        rebased_stacking_orders.get(&old_order_id)
+                    {
+                        order.clone()
+                    } else {
+                        Scene::rebase_stacking_order(
+                            &mut hitbox.stacking_stack,
+                            &range.start.stacking_state,
+                            &new_stacking_state,
+                        );
+                        rebased_stacking_orders.insert(old_order_id, hitbox.stacking_stack.clone());
+                        hitbox.stacking_stack
+                    };
                     hitbox.paint_plane = new_stacking_state.plane;
                     hitbox.insertion_ordinal = insertion_ordinal;
                     insertion_ordinal = insertion_ordinal.wrapping_add(1);
                     hitbox
                 }),
         );
+        if self.next_frame.hitboxes.len() > range.start.hitboxes_index {
+            self.next_frame.hit_order_dirty = true;
+        }
         self.next_frame.tooltip_requests.extend(
             self.rendered_frame.tooltip_requests
                 [range.start.tooltips_index..range.end.tooltips_index]
@@ -4599,7 +4663,7 @@ impl Window {
     /// Enter a stacking boundary for the current element during prepaint or paint.
     pub fn push_stacking_element(
         &mut self,
-        source_order: Vec<u32>,
+        source_order: impl Into<std::sync::Arc<[u32]>>,
         stacking_phase: u8,
         z_index: i32,
         context: bool,
@@ -6122,6 +6186,7 @@ impl Window {
             insertion_ordinal: self.next_frame.hitboxes.len() as u64,
         };
         self.next_frame.hitboxes.push(hitbox.clone());
+        self.next_frame.hit_order_dirty = true;
         hitbox
     }
 
