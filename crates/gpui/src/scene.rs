@@ -75,7 +75,8 @@ pub struct Scene {
     primitive_bounds: BoundsTree<ScaledPixels>,
     layer_stack: Vec<DrawOrder>,
     stacking_stack: Vec<StackingOrder>,
-    stacking_boundaries: Vec<(bool, Vec<u32>, u8)>,
+    slot_owner: Option<StackingOrder>,
+    stacking_boundaries: Vec<(bool, Option<StackingOrder>, Vec<u32>, u8)>,
     current_source_order: Vec<u32>,
     current_stacking_phase: u8,
     paint_phase: u8,
@@ -95,6 +96,7 @@ pub struct Scene {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct StackingState {
     pub(crate) stack: Vec<StackingOrder>,
+    pub(crate) slot_owner: Option<StackingOrder>,
     pub(crate) source_order: Vec<u32>,
     pub(crate) phase: u8,
     pub(crate) plane: usize,
@@ -107,6 +109,7 @@ impl Scene {
         self.primitive_bounds.clear();
         self.layer_stack.clear();
         self.stacking_stack.clear();
+        self.slot_owner = None;
         self.stacking_boundaries.clear();
         self.current_source_order.clear();
         self.current_stacking_phase = 1;
@@ -150,8 +153,13 @@ impl Scene {
         context: bool,
     ) {
         let old_source = std::mem::replace(&mut self.current_source_order, source_order.clone());
-        self.stacking_boundaries
-            .push((context, old_source, self.current_stacking_phase));
+        let old_slot_owner = self.slot_owner.take();
+        self.stacking_boundaries.push((
+            context,
+            old_slot_owner.clone(),
+            old_source,
+            self.current_stacking_phase,
+        ));
         self.current_stacking_phase = stacking_phase;
         if context {
             self.stacking_stack.push(StackingOrder {
@@ -159,6 +167,17 @@ impl Scene {
                 source_order,
                 phase: stacking_phase,
             });
+        } else if stacking_phase == 2 {
+            // A positioned element with z-index:auto owns one slot in its
+            // enclosing context. Its ordinary descendants stay in that slot;
+            // positioned and context descendants replace it when they enter.
+            self.slot_owner = Some(StackingOrder {
+                z_index: 0,
+                source_order,
+                phase: stacking_phase,
+            });
+        } else {
+            self.slot_owner = old_slot_owner;
         }
     }
 
@@ -169,12 +188,13 @@ impl Scene {
 
     /// Pop the most recently pushed stacking boundary.
     pub fn pop_stacking_order(&mut self) {
-        if let Some((context, source_order, phase)) = self.stacking_boundaries.pop() {
+        if let Some((context, slot_owner, source_order, phase)) = self.stacking_boundaries.pop() {
             if context {
                 self.stacking_stack.pop();
             }
             self.current_source_order = source_order;
             self.current_stacking_phase = phase;
+            self.slot_owner = slot_owner;
         }
     }
 
@@ -193,6 +213,9 @@ impl Scene {
 
     pub(crate) fn current_stacking_order(&self) -> Vec<StackingOrder> {
         let mut order = self.stacking_stack.clone();
+        if let Some(slot_owner) = &self.slot_owner {
+            order.push(slot_owner.clone());
+        }
         order.push(StackingOrder {
             phase: self.current_stacking_phase,
             z_index: 0,
@@ -204,6 +227,7 @@ impl Scene {
     pub(crate) fn stacking_state(&self) -> StackingState {
         StackingState {
             stack: self.stacking_stack.clone(),
+            slot_owner: self.slot_owner.clone(),
             source_order: self.current_source_order.clone(),
             phase: self.current_stacking_phase,
             plane: self.paint_plane,
@@ -215,24 +239,26 @@ impl Scene {
         old_state: &StackingState,
         new_state: &StackingState,
     ) {
-        let mut rebased = new_state.stack.clone();
-        rebased.extend(
-            order
-                .iter()
-                .skip(old_state.stack.len())
-                .cloned()
-                .map(|mut entry| {
-                    entry.source_order = rebase_source_order(
-                        &entry.source_order,
-                        &old_state.source_order,
-                        &new_state.source_order,
-                    );
-                    if entry.phase == old_state.phase {
-                        entry.phase = new_state.phase;
-                    }
-                    entry
-                }),
-        );
+        let mut old_base = old_state.stack.clone();
+        old_base.extend(old_state.slot_owner.iter().cloned());
+        let mut new_base = new_state.stack.clone();
+        new_base.extend(new_state.slot_owner.iter().cloned());
+        if !order.starts_with(&old_base) {
+            old_base.clone_from(&old_state.stack);
+            new_base.clone_from(&new_state.stack);
+        }
+        let mut rebased = new_base;
+        rebased.extend(order.iter().skip(old_base.len()).cloned().map(|mut entry| {
+            entry.source_order = rebase_source_order(
+                &entry.source_order,
+                &old_state.source_order,
+                &new_state.source_order,
+            );
+            if entry.phase == old_state.phase {
+                entry.phase = new_state.phase;
+            }
+            entry
+        }));
         *order = rebased;
     }
 
@@ -240,10 +266,19 @@ impl Scene {
     /// The key follows the same stacking context, source order and paint phase
     /// used by [`Scene::finish`].
     pub fn current_paint_order_key(&self) -> PaintOrderKey {
+        let mut stacking = self.current_stacking_order();
+        let phase = if self.slot_owner.is_some() {
+            if let Some(current) = stacking.last_mut() {
+                current.phase = self.paint_phase;
+            }
+            0
+        } else {
+            self.paint_phase
+        };
         PaintOrderKey {
             plane: self.paint_plane,
-            stacking: self.current_stacking_order(),
-            phase: self.paint_phase,
+            stacking,
+            phase,
             ordinal: self.next_paint_ordinal,
         }
     }
@@ -327,6 +362,7 @@ impl Scene {
         self.paint_operations.push(PaintOperation::Primitive {
             primitive,
             stacking_stack: self.stacking_stack.clone(),
+            slot_owner: self.slot_owner.clone(),
             source_order: self.current_source_order.clone(),
             stacking_phase: self.current_stacking_phase,
             plane: self.paint_plane,
@@ -351,6 +387,7 @@ impl Scene {
                 PaintOperation::Primitive {
                     primitive,
                     stacking_stack,
+                    slot_owner,
                     source_order,
                     stacking_phase,
                     plane,
@@ -384,6 +421,16 @@ impl Scene {
                             &new_state.source_order,
                         ),
                     );
+                    let old_slot_owner = self.slot_owner.clone();
+                    let mut new_slot_owner = slot_owner.clone();
+                    if let Some(slot) = &mut new_slot_owner {
+                        slot.source_order = rebase_source_order(
+                            &slot.source_order,
+                            &old_state.source_order,
+                            &new_state.source_order,
+                        );
+                    }
+                    self.slot_owner = new_slot_owner;
                     let old_stacking_phase = self.current_stacking_phase;
                     self.current_stacking_phase = if *stacking_phase == old_state.phase {
                         new_state.phase
@@ -403,6 +450,7 @@ impl Scene {
                     self.paint_phase = old_phase;
                     self.current_source_order = old_source;
                     self.current_stacking_phase = old_stacking_phase;
+                    self.slot_owner = old_slot_owner;
                     self.stacking_stack.truncate(stacking_len);
                 }
                 PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
@@ -444,7 +492,7 @@ impl Scene {
 
     pub fn finish(&mut self) {
         if self.paint_operations.iter().any(|operation| {
-            matches!(operation, PaintOperation::Primitive { stacking_stack, plane, .. } if !stacking_stack.is_empty() || *plane != 0)
+            matches!(operation, PaintOperation::Primitive { stacking_stack, slot_owner, plane, .. } if !stacking_stack.is_empty() || slot_owner.is_some() || *plane != 0)
         }) {
             let mut ordered = self
                 .paint_operations
@@ -453,6 +501,7 @@ impl Scene {
                 .filter_map(|(index, operation)| match operation {
                     PaintOperation::Primitive {
                         stacking_stack,
+                        slot_owner,
                         source_order,
                         stacking_phase,
                         plane,
@@ -462,15 +511,24 @@ impl Scene {
                     } => Some((
                         PaintOrderKey {
                             plane: *plane,
-                            stacking: stacking_stack
-                                .iter()
-                                .cloned()
-                                .chain(std::iter::once(StackingOrder {
-                                    phase: *stacking_phase,
-                                    z_index: 0,
-                                    source_order: source_order.clone(),
-                                }))
-                                .collect(),
+                            stacking: {
+                                let mut stacking = stacking_stack.clone();
+                                if let Some(slot_owner) = slot_owner {
+                                    stacking.push(slot_owner.clone());
+                                    stacking.push(StackingOrder {
+                                        phase: *phase,
+                                        z_index: 0,
+                                        source_order: source_order.clone(),
+                                    });
+                                } else {
+                                    stacking.push(StackingOrder {
+                                        phase: *stacking_phase,
+                                        z_index: 0,
+                                        source_order: source_order.clone(),
+                                    });
+                                }
+                                stacking
+                            },
                             phase: *phase,
                             ordinal: *ordinal,
                         },
@@ -615,6 +673,7 @@ pub(crate) enum PaintOperation {
     Primitive {
         primitive: Primitive,
         stacking_stack: Vec<StackingOrder>,
+        slot_owner: Option<StackingOrder>,
         source_order: Vec<u32>,
         stacking_phase: u8,
         plane: usize,
@@ -1582,6 +1641,61 @@ mod tests {
             .map(|sprite| sprite.tile.tile_id.0)
             .collect();
         assert_eq!(painted, [1, 2, 3]);
+    }
+
+    #[test]
+    fn auto_positioned_container_keeps_its_in_flow_child_inside_its_slot() {
+        let mut scene = Scene::default();
+        let clip_id = scene.insert_clip(ClipNode {
+            folded_bounds: bounds(0., 0., 100., 100.),
+            rounded_bounds: Default::default(),
+            corner_radii: Default::default(),
+            rounded_head: ClipNode::NONE,
+            parent_rounded: ClipNode::NONE,
+        });
+        let glyph = |tile_id| MonochromeSprite {
+            order: 0,
+            clip_id,
+            bounds: bounds(0., 0., 10., 18.),
+            color: Default::default(),
+            tile: AtlasTile {
+                texture_id: AtlasTextureId {
+                    index: 0,
+                    kind: crate::AtlasTextureKind::Monochrome,
+                },
+                tile_id: crate::TileId(tile_id),
+                padding: 0,
+                bounds: Default::default(),
+            },
+            transformation: TransformationMatrix::unit(),
+        };
+
+        // This unrelated context activates Scene::finish's ordering pass.
+        scene.push_stacking_context(-1, vec![1]);
+        scene.insert_primitive(glyph(1));
+        scene.pop_stacking_order();
+
+        // The parent's background and in-flow child's background share the
+        // auto-positioned parent's slot. Decoration phase and retained source
+        // order keep the parent behind its child.
+        scene.push_stacking_element(vec![0], 2, 0, false);
+        scene.set_paint_phase(0);
+        scene.insert_primitive(glyph(2));
+        scene.push_stacking_element(vec![0, 0], 1, 0, false);
+        scene.set_paint_phase(0);
+        scene.insert_primitive(glyph(3));
+        scene.set_paint_phase(1);
+        scene.insert_primitive(glyph(4));
+        scene.pop_stacking_order();
+        scene.pop_stacking_order();
+        scene.finish();
+
+        let painted: Vec<u32> = scene
+            .monochrome_sprites
+            .iter()
+            .map(|sprite| sprite.tile.tile_id.0)
+            .collect();
+        assert_eq!(painted, [1, 2, 3, 4]);
     }
 
     #[test]
