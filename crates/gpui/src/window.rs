@@ -37,8 +37,6 @@ use derive_more::{Deref, DerefMut};
 use futures::channel::oneshot;
 use gpui_util::post_inc;
 use gpui_util::{ResultExt, measure};
-use itertools::FoldWhile::{Continue, Done};
-use itertools::Itertools;
 use parking_lot::RwLock;
 use raw_window_handle::{HandleError, HasDisplayHandle, HasWindowHandle};
 use refineable::Refineable;
@@ -960,6 +958,9 @@ pub struct Hitbox {
     /// Flags that specify hitbox behavior.
     pub behavior: HitboxBehavior,
     identity: Option<GlobalElementId>,
+    pub(crate) stacking_stack: Vec<crate::scene::StackingOrder>,
+    pub(crate) paint_plane: usize,
+    pub(crate) insertion_ordinal: u64,
 }
 
 impl Hitbox {
@@ -1121,6 +1122,7 @@ pub(crate) struct Frame {
     pub(crate) dispatch_tree: DispatchTree,
     pub(crate) scene: Scene,
     pub(crate) hitboxes: Vec<Hitbox>,
+    hit_order: Vec<usize>,
     pub(crate) window_control_hitboxes: Vec<(WindowControlArea, Hitbox)>,
     pub(crate) deferred_draws: Vec<DeferredDraw>,
     pub(crate) input_handlers: Vec<Option<PlatformInputHandler>>,
@@ -1139,6 +1141,7 @@ pub(crate) struct Frame {
 
 #[derive(Clone, Default)]
 pub(crate) struct PrepaintStateIndex {
+    stacking_state: crate::scene::StackingState,
     hitboxes_index: usize,
     tooltips_index: usize,
     deferred_draws_index: usize,
@@ -1149,6 +1152,7 @@ pub(crate) struct PrepaintStateIndex {
 
 #[derive(Clone, Default)]
 pub(crate) struct PaintIndex {
+    stacking_state: crate::scene::StackingState,
     scene_index: usize,
     #[cfg(any(test, feature = "test-support"))]
     debug_bounds_index: usize,
@@ -1179,6 +1183,7 @@ impl Frame {
             dispatch_tree,
             scene: Scene::default(),
             hitboxes: Vec::new(),
+            hit_order: Vec::new(),
             window_control_hitboxes: Vec::new(),
             deferred_draws: Vec::new(),
             input_handlers: Vec::new(),
@@ -1210,6 +1215,7 @@ impl Frame {
         self.tooltip_requests.clear();
         self.cursor_styles.clear();
         self.hitboxes.clear();
+        self.hit_order.clear();
         self.window_control_hitboxes.clear();
         self.deferred_draws.clear();
         self.tab_stops.clear();
@@ -1229,18 +1235,28 @@ impl Frame {
     }
 
     pub(crate) fn cursor_style(&self, window: &Window) -> Option<CursorStyle> {
-        self.cursor_styles
-            .iter()
-            .rev()
-            .fold_while(None, |style, request| match request.hitbox_id {
-                None => Done(Some(request.style)),
-                Some(hitbox_id) => Continue(style.or_else(|| {
-                    hitbox_id
-                        .is_hovered_ignoring_last_input(window)
-                        .then_some(request.style)
-                })),
-            })
-            .into_inner()
+        let mut topmost_hitbox_style = None;
+        let mut topmost_hitbox_rank = None;
+        for request in self.cursor_styles.iter().rev() {
+            let Some(hitbox_id) = request.hitbox_id else {
+                return Some(request.style);
+            };
+            if !hitbox_id.is_hovered_ignoring_last_input(window) {
+                continue;
+            }
+            let Some(rank) = self
+                .hit_order
+                .iter()
+                .position(|&index| self.hitboxes[index].id == hitbox_id)
+            else {
+                continue;
+            };
+            if topmost_hitbox_rank.is_none_or(|topmost_rank| rank > topmost_rank) {
+                topmost_hitbox_rank = Some(rank);
+                topmost_hitbox_style = Some(request.style);
+            }
+        }
+        topmost_hitbox_style
     }
 
     pub(crate) fn hit_test(&self, position: Point<Pixels>) -> HitTest {
@@ -1248,7 +1264,8 @@ impl Frame {
         let mut hit_test = HitTest::default();
         let mut blocker_identity: Option<&GlobalElementId> = None;
         let mut scroll_blocked = false;
-        for hitbox in self.hitboxes.iter().rev() {
+        for &index in self.hit_order.iter().rev() {
+            let hitbox = &self.hitboxes[index];
             if let Some(blocker) = blocker_identity {
                 if hitbox.identity.as_ref().is_some_and(|ancestor| {
                     ancestor.0.len() < blocker.0.len() && blocker.0.starts_with(ancestor.0.as_ref())
@@ -1308,7 +1325,55 @@ impl Frame {
             }
         }
 
+        self.rebuild_hit_order();
+        self.window_control_hitboxes.sort_by(|(_, a), (_, b)| {
+            (b.paint_plane, b.stacking_stack.clone(), b.insertion_ordinal).cmp(&(
+                a.paint_plane,
+                a.stacking_stack.clone(),
+                a.insertion_ordinal,
+            ))
+        });
         self.scene.finish();
+    }
+
+    fn rebuild_hit_order(&mut self) {
+        self.hit_order = (0..self.hitboxes.len()).collect();
+        self.hit_order.sort_by(|&left, &right| {
+            let left_hitbox = &self.hitboxes[left];
+            let right_hitbox = &self.hitboxes[right];
+            let left_identity = left_hitbox.identity.as_ref().map(|identity| &identity.0);
+            let right_identity = right_hitbox.identity.as_ref().map(|identity| &identity.0);
+
+            // A container's hitbox covers its descendants, but the container
+            // must not shield a child merely because its own position places
+            // it in a later paint phase.
+            let descendant_order = match (left_identity, right_identity) {
+                (Some(left), Some(right))
+                    if left.len() < right.len() && right.starts_with(left) =>
+                {
+                    std::cmp::Ordering::Less
+                }
+                (Some(left), Some(right))
+                    if right.len() < left.len() && left.starts_with(right) =>
+                {
+                    std::cmp::Ordering::Greater
+                }
+                _ => std::cmp::Ordering::Equal,
+            };
+
+            descendant_order.then_with(|| {
+                (
+                    left_hitbox.paint_plane,
+                    &left_hitbox.stacking_stack,
+                    left_hitbox.insertion_ordinal,
+                )
+                    .cmp(&(
+                        right_hitbox.paint_plane,
+                        &right_hitbox.stacking_stack,
+                        right_hitbox.insertion_ordinal,
+                    ))
+            })
+        });
     }
 }
 
@@ -4122,6 +4187,8 @@ impl Window {
             tooltip_element = self.prepaint_tooltip(cx);
         }
 
+        self.next_frame.rebuild_hit_order();
+
         // A scroll changes the content under a stationary pointer without changing
         // the pointer's hit target. Keep the previous hit test until the gesture
         // ends so hover styles and listeners do not churn on every scroll frame.
@@ -4277,7 +4344,15 @@ impl Window {
             traversal_order.sort_by_key(|ix| self.next_frame.deferred_draws[*ix].priority);
 
             for deferred_draw_ix in traversal_order {
-                let (element, parent_node, current_view, rem_size, absolute_offset, prepaint_range) = {
+                let (
+                    element,
+                    parent_node,
+                    current_view,
+                    rem_size,
+                    absolute_offset,
+                    prepaint_range,
+                    priority,
+                ) = {
                     let deferred_draw = &mut self.next_frame.deferred_draws[deferred_draw_ix];
                     self.element_id_stack
                         .clone_from(&deferred_draw.element_id_stack);
@@ -4290,10 +4365,15 @@ impl Window {
                         deferred_draw.rem_size,
                         deferred_draw.absolute_offset,
                         deferred_draw.prepaint_range.clone(),
+                        deferred_draw.priority,
                     )
                 };
                 self.next_frame.dispatch_tree.set_active_node(parent_node);
 
+                let old_plane = self
+                    .next_frame
+                    .scene
+                    .set_paint_plane(priority.saturating_add(1));
                 let prepaint_start = self.prepaint_index();
                 if let Some(mut element) = element {
                     self.with_rendered_view(current_view, |window| {
@@ -4310,6 +4390,7 @@ impl Window {
                 let prepaint_end = self.prepaint_index();
                 self.next_frame.deferred_draws[deferred_draw_ix].prepaint_range =
                     prepaint_start..prepaint_end;
+                self.next_frame.scene.set_paint_plane(old_plane);
             }
 
             self.element_id_stack.clear();
@@ -4337,6 +4418,10 @@ impl Window {
                 .dispatch_tree
                 .set_active_node(deferred_draw.parent_node);
 
+            let old_plane = self
+                .next_frame
+                .scene
+                .set_paint_plane(deferred_draw.priority.saturating_add(1));
             let paint_start = self.paint_index();
             let content_mask = deferred_draw.content_mask;
             if let Some(element) = deferred_draw.element.as_mut() {
@@ -4352,6 +4437,7 @@ impl Window {
             }
             let paint_end = self.paint_index();
             deferred_draw.paint_range = paint_start..paint_end;
+            self.next_frame.scene.set_paint_plane(old_plane);
         }
         self.next_frame.deferred_draws = deferred_draws;
         self.element_id_stack.clear();
@@ -4366,6 +4452,7 @@ impl Window {
 
     pub(crate) fn prepaint_index(&self) -> PrepaintStateIndex {
         PrepaintStateIndex {
+            stacking_state: self.next_frame.scene.stacking_state(),
             hitboxes_index: self.next_frame.hitboxes.len(),
             tooltips_index: self.next_frame.tooltip_requests.len(),
             deferred_draws_index: self.next_frame.deferred_draws.len(),
@@ -4376,10 +4463,23 @@ impl Window {
     }
 
     pub(crate) fn reuse_prepaint(&mut self, range: Range<PrepaintStateIndex>) {
+        let new_stacking_state = self.next_frame.scene.stacking_state();
+        let mut insertion_ordinal = self.next_frame.hitboxes.len() as u64;
         self.next_frame.hitboxes.extend(
             self.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index]
                 .iter()
-                .cloned(),
+                .cloned()
+                .map(|mut hitbox| {
+                    Scene::rebase_stacking_order(
+                        &mut hitbox.stacking_stack,
+                        &range.start.stacking_state,
+                        &new_stacking_state,
+                    );
+                    hitbox.paint_plane = new_stacking_state.plane;
+                    hitbox.insertion_ordinal = insertion_ordinal;
+                    insertion_ordinal = insertion_ordinal.wrapping_add(1);
+                    hitbox
+                }),
         );
         self.next_frame.tooltip_requests.extend(
             self.rendered_frame.tooltip_requests
@@ -4428,6 +4528,7 @@ impl Window {
 
     pub(crate) fn paint_index(&self) -> PaintIndex {
         PaintIndex {
+            stacking_state: self.next_frame.scene.stacking_state(),
             scene_index: self.next_frame.scene.len(),
             #[cfg(any(test, feature = "test-support"))]
             debug_bounds_index: self.next_frame.debug_bounds_records.len(),
@@ -4490,7 +4591,38 @@ impl Window {
         self.next_frame.scene.replay(
             range.start.scene_index..range.end.scene_index,
             &self.rendered_frame.scene,
+            &range.start.stacking_state,
+            &self.next_frame.scene.stacking_state(),
         );
+    }
+
+    /// Enter a stacking boundary for the current element during prepaint or paint.
+    pub fn push_stacking_element(
+        &mut self,
+        source_order: Vec<u32>,
+        stacking_phase: u8,
+        z_index: i32,
+        context: bool,
+    ) {
+        self.next_frame
+            .scene
+            .push_stacking_element(source_order, stacking_phase, z_index, context);
+    }
+
+    /// Leave the most recently entered stacking boundary.
+    pub fn pop_stacking_order(&mut self) {
+        self.next_frame.scene.pop_stacking_order();
+    }
+
+    /// Set the phase used by subsequent paint operations.
+    pub fn set_stacking_paint_phase(&mut self, phase: u8) -> u8 {
+        self.next_frame.scene.set_paint_phase(phase)
+    }
+
+    /// Return the current paint-order key for content that maintains its own
+    /// paint-adjacent registry, such as text selection hit resolution.
+    pub fn current_paint_order_key(&self) -> crate::scene::PaintOrderKey {
+        self.next_frame.scene.current_paint_order_key()
     }
 
     /// Push a text style onto the stack, and call a function with that style active.
@@ -5985,6 +6117,9 @@ impl Window {
             rounded_masks,
             behavior,
             identity,
+            stacking_stack: self.next_frame.scene.current_stacking_order(),
+            paint_plane: self.next_frame.scene.paint_plane(),
+            insertion_ordinal: self.next_frame.hitboxes.len() as u64,
         };
         self.next_frame.hitboxes.push(hitbox.clone());
         hitbox
@@ -9133,6 +9268,70 @@ mod tests {
         cx.simulate_keystrokes("a");
         cx.simulate_mouse_move(point(px(110.), px(101.)), None, crate::Modifiers::default());
         assert!(!is_keyboard(cx), "slop is measured from where typing began");
+    }
+
+    struct ReversedCursorStack;
+
+    impl Render for ReversedCursorStack {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .relative()
+                .child(crate::stacking(
+                    div()
+                        .id("topmost")
+                        .absolute()
+                        .left(px(0.))
+                        .top(px(0.))
+                        .w(px(80.))
+                        .h(px(80.))
+                        .cursor_text(),
+                    vec![0],
+                    2,
+                    2,
+                    true,
+                ))
+                .child(crate::stacking(
+                    div()
+                        .id("lower")
+                        .absolute()
+                        .left(px(0.))
+                        .top(px(0.))
+                        .w(px(80.))
+                        .h(px(80.))
+                        .cursor_crosshair(),
+                    vec![1],
+                    2,
+                    1,
+                    true,
+                ))
+        }
+    }
+
+    #[gpui::test]
+    fn cursor_style_uses_the_topmost_stacked_hitbox(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| ReversedCursorStack);
+        let cx = &mut crate::VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_mouse_move(point(px(20.), px(20.)), None, crate::Modifiers::default());
+
+        cx.update(|window, _| {
+            let requests = &window.rendered_frame.cursor_styles;
+            assert_eq!(requests.len(), 2);
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| request.hitbox_id.is_some_and(|id| id.is_hovered(window)))
+            );
+            assert_eq!(
+                window.mouse_hit_test.hover_hitbox_count,
+                window.mouse_hit_test.ids.len(),
+                "both overlapping cursor hitboxes should be hovered"
+            );
+            assert_eq!(
+                window.rendered_frame.cursor_style(window),
+                Some(crate::CursorStyle::IBeam)
+            );
+        });
     }
 
     #[gpui::test]
