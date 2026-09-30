@@ -9279,12 +9279,13 @@ mod tests {
                 .relative()
                 .child(crate::stacking(
                     div()
+                        .id("topmost")
                         .absolute()
                         .left(px(0.))
                         .top(px(0.))
                         .w(px(80.))
                         .h(px(80.))
-                        .cursor_crosshair(),
+                        .cursor_text(),
                     vec![0],
                     2,
                     2,
@@ -9292,12 +9293,13 @@ mod tests {
                 ))
                 .child(crate::stacking(
                     div()
+                        .id("lower")
                         .absolute()
                         .left(px(0.))
                         .top(px(0.))
                         .w(px(80.))
                         .h(px(80.))
-                        .cursor_text(),
+                        .cursor_crosshair(),
                     vec![1],
                     2,
                     1,
@@ -9312,10 +9314,24 @@ mod tests {
         let cx = &mut crate::VisualTestContext::from_window(window.into(), cx);
         cx.simulate_mouse_move(point(px(20.), px(20.)), None, crate::Modifiers::default());
 
-        assert_eq!(
-            cx.update(|window, _| window.rendered_frame.cursor_style(window)),
-            Some(crate::CursorStyle::Crosshair)
-        );
+        cx.update(|window, _| {
+            let requests = &window.rendered_frame.cursor_styles;
+            assert_eq!(requests.len(), 2);
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| request.hitbox_id.is_some_and(|id| id.is_hovered(window)))
+            );
+            assert_eq!(
+                window.mouse_hit_test.hover_hitbox_count,
+                window.mouse_hit_test.ids.len(),
+                "both overlapping cursor hitboxes should be hovered"
+            );
+            assert_eq!(
+                window.rendered_frame.cursor_style(window),
+                Some(crate::CursorStyle::IBeam)
+            );
+        });
     }
 
     #[gpui::test]
