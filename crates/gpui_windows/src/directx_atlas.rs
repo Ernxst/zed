@@ -90,16 +90,17 @@ impl PlatformAtlas for DirectXAtlas {
         bytes: &[u8],
     ) -> anyhow::Result<Option<AtlasTile>> {
         let lock = self.0.lock();
-        if let Some(tile) = lock.tiles_by_key.get(key).copied() {
+        if let Some(tile) = lock.get_tile(key) {
             if tile.bounds.size == size {
-                lock.texture(tile.texture_id)
-                    .upload(&lock.device_context, tile.bounds, bytes);
-                return Ok(Some(tile));
+                if let Some(texture) = lock.backend.texture(tile.texture_id) {
+                    texture.upload(&lock.backend.device_context, tile.bounds, bytes);
+                    return Ok(Some(tile));
+                }
             }
         }
         drop(lock);
         self.remove(key);
-        self.get_or_insert_with(key, &mut || {
+        self.get_or_insert_with(key.clone(), &mut || {
             Ok(Some((size, std::borrow::Cow::Borrowed(bytes))))
         })
     }
