@@ -799,10 +799,10 @@ impl TextLayout {
                 };
                 let balance_range = if text != original_text && !truncation_affix.is_empty() {
                     match truncate_from {
-                        TruncateFrom::End if text.ends_with(&truncation_affix) => {
+                        TruncateFrom::End if text.ends_with(truncation_affix.as_ref()) => {
                             Some(0..text.len() - truncation_affix.len())
                         }
-                        TruncateFrom::Start if text.starts_with(&truncation_affix) => {
+                        TruncateFrom::Start if text.starts_with(truncation_affix.as_ref()) => {
                             Some(truncation_affix.len()..text.len())
                         }
                         _ => None,
@@ -851,8 +851,8 @@ impl TextLayout {
                     && let Some(balanced_width) = lines
                         .iter()
                         .find(|line| {
-                            line.text.ends_with(&truncation_affix)
-                                || line.text.starts_with(&truncation_affix)
+                            line.text.ends_with(truncation_affix.as_ref())
+                                || line.text.starts_with(truncation_affix.as_ref())
                         })
                         .and_then(|line| line.layout.wrap_width)
                 {
@@ -866,10 +866,14 @@ impl TextLayout {
                     );
                     if balanced_text != text {
                         let balance_range = match truncate_from {
-                            TruncateFrom::End if balanced_text.ends_with(&truncation_affix) => {
+                            TruncateFrom::End
+                                if balanced_text.ends_with(truncation_affix.as_ref()) =>
+                            {
                                 Some(0..balanced_text.len() - truncation_affix.len())
                             }
-                            TruncateFrom::Start if balanced_text.starts_with(&truncation_affix) => {
+                            TruncateFrom::Start
+                                if balanced_text.starts_with(truncation_affix.as_ref()) =>
+                            {
                                 Some(truncation_affix.len()..balanced_text.len())
                             }
                             _ => None,
@@ -880,7 +884,7 @@ impl TextLayout {
                                 balanced_text.clone(),
                                 font_size,
                                 &balanced_runs,
-                                wrap_width,
+                                Some(wrap_width),
                                 Some(max_lines),
                                 true,
                                 balance_range,
