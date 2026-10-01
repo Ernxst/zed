@@ -315,6 +315,19 @@ impl Scene {
         self.current_stacking_order.clone()
     }
 
+    pub(crate) fn current_hitbox_stacking_order(&mut self) -> Arc<[StackingOrder]> {
+        let Some(current_element) = self.current_stacking_order.last() else {
+            return self.current_stacking_order.clone();
+        };
+        if current_element.context || current_element.phase == 1 {
+            return self.current_stacking_order.clone();
+        }
+
+        let mut order = self.current_stacking_order.to_vec();
+        order.last_mut().unwrap().phase = 1;
+        self.intern_stacking_order(order).0
+    }
+
     pub(crate) fn stacking_state(&self) -> StackingState {
         StackingState {
             stack: self.stacking_stack.clone(),
@@ -801,6 +814,8 @@ fn compare_stacking_orders(
     left.len().cmp(&right.len())
 }
 
+/// Compare stacking paths for hitboxes, whose ordering follows the element's
+/// source position when one hitbox belongs to an ancestor of the other.
 fn rebase_source_order(source_order: &[u32], old: &[u32], new: &[u32]) -> Arc<[u32]> {
     if source_order.starts_with(old) {
         Arc::from(
@@ -1670,6 +1685,19 @@ impl PathVertex<Pixels> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hitbox_stacking_order_reuses_normalized_keys() {
+        let mut scene = Scene::default();
+        scene.push_stacking_element([], 2, 0, false);
+
+        let first = scene.current_hitbox_stacking_order();
+        let second = scene.current_hitbox_stacking_order();
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first[0].phase, 2);
+        assert_eq!(first[1].phase, 1);
+    }
 
     fn bounds(x: f32, y: f32, width: f32, height: f32) -> Bounds<ScaledPixels> {
         Bounds {

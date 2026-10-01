@@ -1463,6 +1463,36 @@ mod hitbox_order_tests {
         stack
     }
 
+    fn non_context_stacking_stack(path: &[(u8, u32)]) -> Arc<[crate::scene::StackingOrder]> {
+        let mut scene = Scene::default();
+        for &(phase, source_order) in path {
+            scene.push_stacking_element([source_order], phase, 0, false);
+        }
+        let stack = scene.current_stacking_order();
+        for _ in path {
+            scene.pop_stacking_order();
+        }
+        stack
+    }
+
+    fn mixed_stacking_stack(path: &[(bool, u8, i32, u32)]) -> Arc<[crate::scene::StackingOrder]> {
+        let mut scene = Scene::default();
+        for &(context, phase, z_index, source_order) in path {
+            scene.push_stacking_element([source_order], phase, z_index, context);
+        }
+        let stack = scene.current_stacking_order();
+        for _ in path {
+            scene.pop_stacking_order();
+        }
+        stack
+    }
+
+    fn non_context_stack_at(phase: u8, source_order: &[u32]) -> Arc<[crate::scene::StackingOrder]> {
+        let mut scene = Scene::default();
+        scene.push_stacking_element(source_order.to_vec(), phase, 0, false);
+        scene.current_stacking_order()
+    }
+
     #[test]
     fn ordinary_nested_hitboxes_with_different_paint_planes_have_a_total_order() {
         let stack = stacking_stack(&[]);
@@ -1589,6 +1619,29 @@ mod hitbox_order_tests {
     }
 
     #[test]
+    fn ancestor_hitbox_precedes_ordinary_descendant_even_when_phases_differ() {
+        let mut scene = Scene::default();
+        scene.push_stacking_element([], 2, 0, false);
+        let ancestor = HitboxOrderKey {
+            identity: identity(&[1]),
+            identity_order: identity(&[1]).as_ref().map(hitbox_identity_order),
+            stacking_stack: scene.current_hitbox_stacking_order(),
+            paint_plane: 0,
+            insertion_ordinal: 1,
+        };
+        scene.push_stacking_element([0, 0], 1, 0, false);
+        let descendant = HitboxOrderKey {
+            identity: identity(&[1, 2]),
+            identity_order: identity(&[1, 2]).as_ref().map(hitbox_identity_order),
+            stacking_stack: scene.current_hitbox_stacking_order(),
+            paint_plane: 0,
+            insertion_ordinal: 2,
+        };
+
+        assert!(ancestor.compare(&descendant).is_lt());
+    }
+
+    #[test]
     fn hitbox_order_is_a_total_order_for_generated_stacking_keys() {
         let identities = [None, identity(&[1]), identity(&[1, 2]), identity(&[2])];
         let stacks = [
@@ -1608,6 +1661,21 @@ mod hitbox_order_tests {
             stacking_stack(&[(1, 0), (-1, 1)]),
             stacking_stack(&[(1, 0), (0, 1)]),
             stacking_stack(&[(1, 0), (1, 1)]),
+            non_context_stacking_stack(&[(2, 0), (2, 0)]),
+            non_context_stacking_stack(&[(2, 0), (1, 1)]),
+            non_context_stacking_stack(&[(1, 0), (2, 1)]),
+            non_context_stacking_stack(&[(1, 0), (1, 1)]),
+            non_context_stacking_stack(&[(2, 0), (0, 1)]),
+            non_context_stacking_stack(&[(0, 0), (3, 1)]),
+            non_context_stacking_stack(&[(1, 0), (2, 1), (1, 2)]),
+            non_context_stacking_stack(&[(1, 0), (0, 1), (3, 2)]),
+            mixed_stacking_stack(&[(true, 1, -1, 0), (false, 2, 0, 1)]),
+            mixed_stacking_stack(&[(true, 1, 0, 0), (false, 1, 0, 1)]),
+            mixed_stacking_stack(&[(true, 2, 1, 0), (false, 2, 0, 1)]),
+            mixed_stacking_stack(&[(true, 1, 0, 0), (false, 1, 0, 1), (true, 3, 2, 2)]),
+            non_context_stack_at(1, &[2, 0]),
+            non_context_stack_at(2, &[1, 1]),
+            non_context_stack_at(2, &[2]),
         ];
         let mut keys = Vec::new();
         for identity in &identities {
@@ -6417,7 +6485,7 @@ impl Window {
             rounded_masks,
             behavior,
             identity,
-            stacking_stack: self.next_frame.scene.current_stacking_order(),
+            stacking_stack: self.next_frame.scene.current_hitbox_stacking_order(),
             paint_plane: self.next_frame.scene.paint_plane(),
             insertion_ordinal: self.next_frame.hitboxes.len() as u64,
         };
