@@ -1330,6 +1330,12 @@ impl WindowsWindowInner {
     ) -> Option<isize> {
         self.report_visibility();
         if wparam.0 == 1 {
+            if std::env::var_os("GPU_IX_TRACE_APP_BORROW").is_some() {
+                eprintln!(
+                    "[GPU-IX-WINDOW-SHOW-DRAW] active_mutable_borrows={:?}",
+                    gpui::debug_active_mutable_app_borrows()
+                );
+            }
             self.draw_window(handle, false);
         }
         None
