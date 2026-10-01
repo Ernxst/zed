@@ -992,16 +992,8 @@ impl HitboxOrderKey {
     }
 
     fn compare(&self, other: &Self) -> std::cmp::Ordering {
-        let self_contexts = self.stacking_stack.iter().filter(|order| order.context);
-        let other_contexts = other.stacking_stack.iter().filter(|order| order.context);
         self.paint_plane
             .cmp(&other.paint_plane)
-            .then_with(|| {
-                self.stacking_stack
-                    .first()
-                    .cmp(&other.stacking_stack.first())
-            })
-            .then_with(|| self_contexts.cmp(other_contexts))
             .then_with(|| self.stacking_stack.cmp(&other.stacking_stack))
             .then_with(|| self.insertion_ordinal.cmp(&other.insertion_ordinal))
             .then_with(|| self.identity_order.cmp(&other.identity_order))
