@@ -1526,7 +1526,7 @@ unsafe extern "system" fn window_procedure(
     if std::env::var_os("GPU_IX_TRACE_APP_BORROW").is_some()
         && matches!(
             msg,
-            WM_PAINT | WM_SIZE | WM_MOVE | WM_WINDOWPOSCHANGED | WM_DPICHANGED
+            WM_ACTIVATE | WM_SIZE | WM_MOVE | WM_WINDOWPOSCHANGED | WM_DPICHANGED | WM_SHOWWINDOW
         )
     {
         eprintln!(

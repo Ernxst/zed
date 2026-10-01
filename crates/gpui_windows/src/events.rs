@@ -857,6 +857,12 @@ impl WindowsWindowInner {
                     modifiers: current_modifiers(),
                     capslock: current_capslock(),
                 });
+                if std::env::var_os("GPU_IX_TRACE_APP_BORROW").is_some() {
+                    eprintln!(
+                        "[GPU-IX-WINDOW-ACTIVATE-INPUT] active_mutable_borrows={:?}",
+                        gpui::debug_active_mutable_app_borrows()
+                    );
+                }
                 func(input);
                 this.state.callbacks.input.set(Some(func));
             }
