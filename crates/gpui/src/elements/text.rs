@@ -848,14 +848,16 @@ impl TextLayout {
                     && text_style.text_wrap == TextWrap::Balance
                     && let (Some(max_lines), Some(wrap_width), Some(_)) =
                         (text_style.line_clamp, wrap_width, balance_range)
-                    && let Some((ellipsis_group_ix, balanced_width)) = lines
-                        .iter()
-                        .enumerate()
-                        .find(|(_, line)| {
+                    && let Some(ellipsis_group_ix) = match truncate_from {
+                        TruncateFrom::End => lines.iter().rposition(|line| {
                             line.text.ends_with(truncation_affix.as_ref())
-                                || line.text.starts_with(truncation_affix.as_ref())
-                        })
-                        .and_then(|(ix, line)| line.layout.wrap_width.map(|width| (ix, width)))
+                        }),
+                        TruncateFrom::Start => lines.iter().position(|line| {
+                            line.text.starts_with(truncation_affix.as_ref())
+                        }),
+                        TruncateFrom::Middle => None,
+                    }
+                    && let Some(balanced_width) = lines[ellipsis_group_ix].layout.wrap_width
                 {
                     let (balanced_text, balanced_runs) = if truncate_from == TruncateFrom::End {
                         // Keep already-balanced forced-break groups intact. Only the group that
