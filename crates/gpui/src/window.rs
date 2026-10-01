@@ -972,6 +972,17 @@ struct HitboxOrderKey {
     insertion_ordinal: u64,
 }
 
+fn hitbox_identity_order(identity: &GlobalElementId) -> Vec<String> {
+    identity
+        .0
+        .iter()
+        .map(|part| match part {
+            ElementId::Integer(value) => format!("Integer({value:020})"),
+            _ => format!("{part:?}"),
+        })
+        .collect()
+}
+
 impl HitboxOrderKey {
     fn matches(&self, hitbox: &Hitbox) -> bool {
         self.identity == hitbox.identity
@@ -991,8 +1002,8 @@ impl HitboxOrderKey {
                     .cmp(&other.stacking_stack.first())
             })
             .then_with(|| self_contexts.cmp(other_contexts))
-            .then_with(|| self.stacking_stack.cmp(&other.stacking_stack))
             .then_with(|| self.identity_order.cmp(&other.identity_order))
+            .then_with(|| self.stacking_stack.cmp(&other.stacking_stack))
             .then_with(|| self.insertion_ordinal.cmp(&other.insertion_ordinal))
     }
 }
@@ -1398,13 +1409,10 @@ impl Frame {
             .iter()
             .map(|hitbox| HitboxOrderKey {
                 identity: hitbox.identity.clone(),
-                identity_order: hitbox.identity.as_ref().map(|identity| {
-                    identity
-                        .0
-                        .iter()
-                        .map(|part| format!("{:?}", part))
-                        .collect()
-                }),
+                identity_order: hitbox
+                    .identity
+                    .as_ref()
+                    .map(|identity| hitbox_identity_order(identity)),
                 stacking_stack: hitbox.stacking_stack.clone(),
                 paint_plane: hitbox.paint_plane,
                 insertion_ordinal: hitbox.insertion_ordinal,
@@ -1420,7 +1428,7 @@ impl Frame {
 
 #[cfg(test)]
 mod hitbox_order_tests {
-    use super::HitboxOrderKey;
+    use super::{HitboxOrderKey, hitbox_identity_order};
     use crate::{ElementId, GlobalElementId, scene::Scene};
     use std::sync::Arc;
 
@@ -1466,26 +1474,14 @@ mod hitbox_order_tests {
             },
             HitboxOrderKey {
                 identity: identity(&[1]),
-                identity_order: identity(&[1]).map(|identity| {
-                    identity
-                        .0
-                        .iter()
-                        .map(|part| format!("{:?}", part))
-                        .collect()
-                }),
+                identity_order: identity(&[1]).as_ref().map(hitbox_identity_order),
                 stacking_stack: stack.clone(),
                 paint_plane: 1,
                 insertion_ordinal: 13,
             },
             HitboxOrderKey {
                 identity: identity(&[1, 2]),
-                identity_order: identity(&[1, 2]).map(|identity| {
-                    identity
-                        .0
-                        .iter()
-                        .map(|part| format!("{:?}", part))
-                        .collect()
-                }),
+                identity_order: identity(&[1, 2]).as_ref().map(hitbox_identity_order),
                 stacking_stack: stack,
                 paint_plane: 0,
                 insertion_ordinal: 24,
@@ -1505,17 +1501,63 @@ mod hitbox_order_tests {
     }
 
     #[test]
+    fn ordinary_ancestor_keys_with_conflicting_insertion_order_sort_consistently() {
+        let stack = stacking_stack(&[]);
+        let keys = [
+            HitboxOrderKey {
+                identity: identity(&[2]),
+                identity_order: identity(&[2]).as_ref().map(hitbox_identity_order),
+                stacking_stack: stack.clone(),
+                paint_plane: 0,
+                insertion_ordinal: 1,
+            },
+            HitboxOrderKey {
+                identity: identity(&[1]),
+                identity_order: identity(&[1]).as_ref().map(hitbox_identity_order),
+                stacking_stack: stack.clone(),
+                paint_plane: 0,
+                insertion_ordinal: 2,
+            },
+            HitboxOrderKey {
+                identity: identity(&[1, 3]),
+                identity_order: identity(&[1, 3]).as_ref().map(hitbox_identity_order),
+                stacking_stack: stack,
+                paint_plane: 0,
+                insertion_ordinal: 0,
+            },
+        ];
+
+        let mut sorted = keys.clone();
+        sorted.sort_by(HitboxOrderKey::compare);
+
+        assert_eq!(
+            sorted
+                .iter()
+                .map(|key| key.identity_order.as_ref().unwrap().clone())
+                .collect::<Vec<_>>(),
+            [
+                vec![String::from("Integer(00000000000000000001)")],
+                vec![
+                    String::from("Integer(00000000000000000001)"),
+                    String::from("Integer(00000000000000000003)"),
+                ],
+                vec![String::from("Integer(00000000000000000002)")],
+            ]
+        );
+    }
+
+    #[test]
     fn positioned_auto_siblings_follow_their_paint_source_order() {
         let earlier_painted = HitboxOrderKey {
-            identity: identity(&[99]),
-            identity_order: Some(vec!["Integer(99)".into()]),
+            identity: identity(&[1]),
+            identity_order: identity(&[1]).as_ref().map(hitbox_identity_order),
             stacking_stack: positioned_auto_stacking_stack(1),
             paint_plane: 0,
             insertion_ordinal: 1,
         };
         let later_painted = HitboxOrderKey {
-            identity: identity(&[1]),
-            identity_order: Some(vec!["Integer(1)".into()]),
+            identity: identity(&[2]),
+            identity_order: identity(&[2]).as_ref().map(hitbox_identity_order),
             stacking_stack: positioned_auto_stacking_stack(2),
             paint_plane: 0,
             insertion_ordinal: 2,
@@ -1552,13 +1594,7 @@ mod hitbox_order_tests {
                     let insertion_ordinal = keys.len() as u64;
                     keys.push(HitboxOrderKey {
                         identity: identity.clone(),
-                        identity_order: identity.as_ref().map(|identity| {
-                            identity
-                                .0
-                                .iter()
-                                .map(|part| format!("{:?}", part))
-                                .collect()
-                        }),
+                        identity_order: identity.as_ref().map(hitbox_identity_order),
                         stacking_stack: stack.clone(),
                         paint_plane,
                         insertion_ordinal,
