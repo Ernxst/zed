@@ -1002,8 +1002,8 @@ impl HitboxOrderKey {
                     .cmp(&other.stacking_stack.first())
             })
             .then_with(|| self_contexts.cmp(other_contexts))
-            .then_with(|| self.identity_order.cmp(&other.identity_order))
             .then_with(|| self.stacking_stack.cmp(&other.stacking_stack))
+            .then_with(|| self.identity_order.cmp(&other.identity_order))
             .then_with(|| self.insertion_ordinal.cmp(&other.insertion_ordinal))
     }
 }
@@ -1461,6 +1461,16 @@ mod hitbox_order_tests {
         stack
     }
 
+    fn ordinary_stacking_stack(source_order: u32) -> Arc<[crate::scene::StackingOrder]> {
+        let mut scene = Scene::default();
+        scene.push_stacking_context(0, [0]);
+        scene.push_stacking_container([source_order]);
+        let stack = scene.current_stacking_order();
+        scene.pop_stacking_order();
+        scene.pop_stacking_order();
+        stack
+    }
+
     #[test]
     fn ordinary_nested_hitboxes_with_different_paint_planes_have_a_total_order() {
         let stack = stacking_stack(&[]);
@@ -1549,16 +1559,36 @@ mod hitbox_order_tests {
     #[test]
     fn positioned_auto_siblings_follow_their_paint_source_order() {
         let earlier_painted = HitboxOrderKey {
-            identity: identity(&[1]),
-            identity_order: identity(&[1]).as_ref().map(hitbox_identity_order),
+            identity: identity(&[2]),
+            identity_order: identity(&[2]).as_ref().map(hitbox_identity_order),
             stacking_stack: positioned_auto_stacking_stack(1),
             paint_plane: 0,
             insertion_ordinal: 1,
         };
         let later_painted = HitboxOrderKey {
+            identity: identity(&[1]),
+            identity_order: identity(&[1]).as_ref().map(hitbox_identity_order),
+            stacking_stack: positioned_auto_stacking_stack(2),
+            paint_plane: 0,
+            insertion_ordinal: 2,
+        };
+
+        assert!(earlier_painted.compare(&later_painted).is_lt());
+    }
+
+    #[test]
+    fn ordinary_siblings_follow_their_paint_source_order_when_identities_are_reversed() {
+        let earlier_painted = HitboxOrderKey {
             identity: identity(&[2]),
             identity_order: identity(&[2]).as_ref().map(hitbox_identity_order),
-            stacking_stack: positioned_auto_stacking_stack(2),
+            stacking_stack: ordinary_stacking_stack(1),
+            paint_plane: 0,
+            insertion_ordinal: 1,
+        };
+        let later_painted = HitboxOrderKey {
+            identity: identity(&[1]),
+            identity_order: identity(&[1]).as_ref().map(hitbox_identity_order),
+            stacking_stack: ordinary_stacking_stack(2),
             paint_plane: 0,
             insertion_ordinal: 2,
         };
