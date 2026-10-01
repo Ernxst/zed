@@ -1856,6 +1856,53 @@ mod tests {
     }
 
     #[test]
+    fn ancestor_outline_paints_over_a_positioned_descendant() {
+        let mut scene = Scene::default();
+        let clip_id = scene.insert_clip(ClipNode {
+            folded_bounds: bounds(0., 0., 100., 100.),
+            rounded_bounds: Default::default(),
+            corner_radii: Default::default(),
+            rounded_head: ClipNode::NONE,
+            parent_rounded: ClipNode::NONE,
+        });
+        let glyph = |tile_id| MonochromeSprite {
+            order: 0,
+            clip_id,
+            bounds: bounds(0., 0., 10., 18.),
+            color: Default::default(),
+            tile: AtlasTile {
+                texture_id: AtlasTextureId {
+                    index: 0,
+                    kind: crate::AtlasTextureKind::Monochrome,
+                },
+                tile_id: crate::TileId(tile_id),
+                padding: 0,
+                bounds: Default::default(),
+            },
+            transformation: TransformationMatrix::unit(),
+        };
+
+        // Positioned descendants paint their contents after an ancestor's
+        // outline, even when the ancestor is also positioned with z-index:auto.
+        scene.push_stacking_element(vec![0], 2, 0, false);
+        scene.push_stacking_element(vec![0, 0], 2, 0, false);
+        scene.set_paint_phase(0);
+        scene.insert_primitive(glyph(1));
+        scene.pop_stacking_order();
+        scene.set_paint_phase(2);
+        scene.insert_primitive(glyph(2));
+        scene.pop_stacking_order();
+        scene.finish();
+
+        let painted: Vec<u32> = scene
+            .monochrome_sprites
+            .iter()
+            .map(|sprite| sprite.tile.tile_id.0)
+            .collect();
+        assert_eq!(painted, [1, 2]);
+    }
+
+    #[test]
     fn auto_positioned_container_keeps_its_in_flow_child_inside_its_slot() {
         let mut scene = Scene::default();
         let clip_id = scene.insert_clip(ClipNode {
