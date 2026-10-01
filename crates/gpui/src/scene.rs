@@ -1978,9 +1978,9 @@ mod tests {
         let full_bounds_quad = |clip_id: u32, color: Hsla| Quad {
             order: 0,
             clip_id,
-            pad: 0,
             bounds: bounds(0., 0., 100., 100.),
             background: color.into(),
+            pad: 0,
             corner_radii: Corners::all(ScaledPixels(24.)),
             border_widths: Edges::default(),
             border_color: Default::default(),
