@@ -191,6 +191,7 @@ impl Scene {
         self.current_stacking_phase = stacking_phase;
         if context {
             self.stacking_stack.push(StackingOrder {
+                context: true,
                 z_index,
                 source_order,
                 phase: stacking_phase,
@@ -200,6 +201,7 @@ impl Scene {
             // enclosing context. Its ordinary descendants stay in that slot;
             // positioned and context descendants replace it when they enter.
             self.slot_owner = Some(StackingOrder {
+                context: false,
                 z_index: 0,
                 source_order,
                 phase: stacking_phase,
@@ -250,6 +252,7 @@ impl Scene {
             order.push(slot_owner.clone());
         }
         order.push(StackingOrder {
+            context: false,
             phase: self.current_stacking_phase,
             z_index: 0,
             source_order: self.current_source_order.clone(),
@@ -755,6 +758,7 @@ pub(crate) struct StackingOrder {
     phase: u8,
     z_index: i32,
     source_order: Arc<[u32]>,
+    pub(crate) context: bool,
 }
 
 /// A paint-order position suitable for resolving overlap in a non-scene registry.
