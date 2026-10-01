@@ -199,6 +199,7 @@ impl AppCell {
 pub struct AppRef<'a> {
     #[deref]
     app: Ref<'a, App>,
+    #[deref_mut(ignore)]
     trace_id: Option<(&'a AppCell, u64)>,
 }
 
