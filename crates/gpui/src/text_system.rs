@@ -756,7 +756,9 @@ impl WindowTextSystem {
         wrap_width: Option<Pixels>,
         line_clamp: Option<usize>,
     ) -> Result<SmallVec<[WrappedLine; 1]>> {
-        self.shape_text_with_balance(text, font_size, runs, wrap_width, line_clamp, false, None)
+        self.shape_text_with_balance(
+            text, font_size, runs, wrap_width, line_clamp, false, None, None,
+        )
     }
 
     /// Shape text with optional balanced wrapping. Balancing is applied independently to each
@@ -770,6 +772,7 @@ impl WindowTextSystem {
         line_clamp: Option<usize>,
         balance: bool,
         balance_range: Option<Range<usize>>,
+        balance_width_override: Option<Pixels>,
     ) -> Result<SmallVec<[WrappedLine; 1]>> {
         let mut runs = runs.iter().filter(|run| run.len > 0).cloned().peekable();
         let mut font_runs = self.font_runs_pool.lock().pop().unwrap_or_default();
@@ -846,6 +849,7 @@ impl WindowTextSystem {
                         })
                         .max(balance_start);
                     let balance_text = &line_text[balance_start..balance_end];
+                    let has_excluded_affix = balance_start > 0 || balance_end < line_text.len();
                     let mut balance_runs = SmallVec::<[FontRun; 1]>::new();
                     let mut run_start = 0;
                     for run in &font_runs {
@@ -859,14 +863,17 @@ impl WindowTextSystem {
                         }
                         run_start = run_end;
                     }
-                    self.line_layout_cache
-                        .balanced_wrap_width(
-                            balance_text,
-                            font_size,
-                            &balance_runs,
-                            width,
-                            remaining_lines,
-                        )
+                    balance_width_override
+                        .filter(|_| has_excluded_affix)
+                        .or_else(|| {
+                            self.line_layout_cache.balanced_wrap_width(
+                                balance_text,
+                                font_size,
+                                &balance_runs,
+                                width,
+                                remaining_lines,
+                            )
+                        })
                         .or(Some(width))
                 } else {
                     Some(width)

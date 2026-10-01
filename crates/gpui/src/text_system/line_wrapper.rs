@@ -1288,6 +1288,7 @@ mod tests {
                     None,
                     true,
                     None,
+                    None,
                 )
                 .unwrap();
             let line_count = |lines: &[crate::WrappedLine]| {
@@ -1327,6 +1328,7 @@ mod tests {
                     None,
                     true,
                     None,
+                    None,
                 )
                 .unwrap();
             assert_eq!(line_count(&one_line), 1);
@@ -1360,6 +1362,7 @@ mod tests {
                     None,
                     true,
                     None,
+                    None,
                 )
                 .unwrap();
             assert_eq!(line_count(&mixed_balanced), line_count(&mixed_greedy));
@@ -1368,7 +1371,7 @@ mod tests {
                 .shape_text(text.into(), px(18.), &[plain.clone()], None, None)
                 .unwrap();
             let intrinsic_with_balance = text_system
-                .shape_text_with_balance(text.into(), px(18.), &[plain], None, None, true, None)
+                .shape_text_with_balance(text.into(), px(18.), &[plain], None, None, true, None, None)
                 .unwrap();
             assert_eq!(intrinsic.len(), intrinsic_with_balance.len());
             assert_eq!(
@@ -1401,6 +1404,7 @@ mod tests {
                     None,
                     true,
                     None,
+                    None,
                 )
                 .unwrap();
             assert_eq!(
@@ -1423,6 +1427,7 @@ mod tests {
                     None,
                     true,
                     None,
+                    None,
                 )
                 .unwrap();
             assert_eq!(forced_lines.len(), 2);
@@ -1442,7 +1447,7 @@ mod tests {
                 .shape_text(cjk.into(), px(18.), &[cjk_run.clone()], Some(px(95.)), None)
                 .unwrap();
             let cjk_balanced = text_system
-                .shape_text_with_balance(cjk.into(), px(18.), &[cjk_run], Some(px(95.)), None, true, None)
+                .shape_text_with_balance(cjk.into(), px(18.), &[cjk_run], Some(px(95.)), None, true, None, None)
                 .unwrap();
             assert_eq!(line_count(&cjk_balanced), line_count(&cjk_greedy));
 
@@ -1475,24 +1480,46 @@ mod tests {
                     Some(2),
                     true,
                     None,
+                    None,
                 )
                 .unwrap();
+            let balanced_width = balanced_prefix[0].layout.wrap_width.unwrap();
+            let (balanced_truncated, balanced_runs) = wrapper.truncate_wrapped_line(
+                clamped_text.into(),
+                balanced_width,
+                2,
+                "…",
+                &[clamped_run.clone()],
+                TruncateFrom::End,
+            );
+            assert!(balanced_truncated.ends_with('…'));
+            assert!(balanced_truncated.len() < truncated.len());
+            let balanced_visible_prefix_len = balanced_truncated.len() - '…'.len_utf8();
             let balanced_with_ellipsis = text_system
                 .shape_text_with_balance(
-                    truncated,
+                    balanced_truncated.clone(),
                     px(18.),
-                    &[clamped_run],
+                    &balanced_runs,
                     Some(px(150.)),
                     Some(2),
                     true,
-                    Some(0..visible_prefix_len),
+                    Some(0..balanced_visible_prefix_len),
+                    Some(balanced_width),
                 )
                 .unwrap();
             assert_eq!(
                 balanced_with_ellipsis[0].layout.wrap_width,
-                balanced_prefix[0].layout.wrap_width
+                Some(balanced_width)
             );
             assert_eq!(line_count(&balanced_with_ellipsis), 2);
+            let wrapped = &balanced_with_ellipsis[0].layout;
+            let layout = &wrapped.unwrapped_layout;
+            let last_line_start = wrapped
+                .wrap_boundaries()
+                .last()
+                .map_or(0, |boundary| layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index);
+            assert!(balanced_visible_prefix_len >= last_line_start);
+            assert!(layout.width - layout.x_for_index(last_line_start) <= balanced_width);
         });
     }
 

@@ -757,6 +757,7 @@ impl TextLayout {
 
                 let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
                 let original_text = text.clone();
+                let original_runs = runs.clone();
                 let (text, runs) = if let Some(truncate_width) = truncate_width {
                     if let Some(max_lines) = text_style.line_clamp
                         && let Some(wrap_width) = wrap_width
@@ -809,18 +810,19 @@ impl TextLayout {
                 } else {
                     None
                 };
-                let len = text.len();
+                let mut len = text.len();
 
-                let Some(lines) = window
+                let Some(mut lines) = window
                     .text_system()
                     .shape_text_with_balance(
-                        text,
+                        text.clone(),
                         font_size,
                         &runs,
                         wrap_width,            // Wrap if we know the width.
                         text_style.line_clamp, // Limit the number of lines if line_clamp is set.
                         text_style.text_wrap == TextWrap::Balance,
-                        balance_range,
+                        balance_range.clone(),
+                        None,
                     )
                     .log_err()
                 else {
@@ -837,6 +839,60 @@ impl TextLayout {
                     });
                     return (Size::default(), None);
                 };
+
+                // The first pass balances the visible prefix without its truncation affix. Use
+                // that width to truncate again so the affix fits the balanced final line, then
+                // keep that width fixed while shaping the result.
+                if text != original_text
+                    && !truncation_affix.is_empty()
+                    && text_style.text_wrap == TextWrap::Balance
+                    && let (Some(max_lines), Some(wrap_width), Some(_)) =
+                        (text_style.line_clamp, wrap_width, balance_range)
+                    && let Some(balanced_width) = lines
+                        .iter()
+                        .find(|line| {
+                            line.text.ends_with(&truncation_affix)
+                                || line.text.starts_with(&truncation_affix)
+                        })
+                        .and_then(|line| line.layout.wrap_width)
+                {
+                    let (balanced_text, balanced_runs) = line_wrapper.truncate_wrapped_line(
+                        original_text.clone(),
+                        balanced_width,
+                        max_lines,
+                        &truncation_affix,
+                        &original_runs,
+                        truncate_from,
+                    );
+                    if balanced_text != text {
+                        let balance_range = match truncate_from {
+                            TruncateFrom::End if balanced_text.ends_with(&truncation_affix) => {
+                                Some(0..balanced_text.len() - truncation_affix.len())
+                            }
+                            TruncateFrom::Start if balanced_text.starts_with(&truncation_affix) => {
+                                Some(truncation_affix.len()..balanced_text.len())
+                            }
+                            _ => None,
+                        };
+                        if let Some(balanced_lines) = window
+                            .text_system()
+                            .shape_text_with_balance(
+                                balanced_text.clone(),
+                                font_size,
+                                &balanced_runs,
+                                wrap_width,
+                                Some(max_lines),
+                                true,
+                                balance_range,
+                                Some(balanced_width),
+                            )
+                            .log_err()
+                        {
+                            len = balanced_text.len();
+                            lines = balanced_lines;
+                        }
+                    }
+                }
 
                 let mut size: Size<Pixels> = Size::default();
                 for line in &lines {
