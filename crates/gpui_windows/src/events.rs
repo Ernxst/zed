@@ -30,6 +30,8 @@ pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
 pub(crate) const WM_GPUI_KEYDOWN: u32 = WM_USER + 8;
 pub(crate) const WM_GPUI_END_SESSION: u32 = WM_USER + 9;
 pub(crate) const WM_GPUI_REDUCE_MOTION_CHANGED: u32 = WM_USER + 10;
+const WM_GPUI_WINDOW_MOVED: u32 = WM_USER + 11;
+const WM_GPUI_WINDOW_RESIZED: u32 = WM_USER + 12;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
 
@@ -98,7 +100,9 @@ impl WindowsWindowInner {
             WM_ACTIVATE => self.handle_activate_msg(wparam),
             WM_CREATE => self.handle_create_msg(handle),
             WM_MOVE => self.handle_move_msg(handle, lparam),
-            WM_SIZE => self.handle_size_msg(wparam, lparam),
+            WM_SIZE => self.handle_size_msg(handle, wparam, lparam),
+            WM_GPUI_WINDOW_MOVED => self.handle_deferred_move(),
+            WM_GPUI_WINDOW_RESIZED => self.handle_deferred_resize(),
             WM_GETMINMAXINFO => self.handle_get_min_max_info_msg(lparam),
             WM_ENTERSIZEMOVE | WM_ENTERMENULOOP => self.handle_size_move_loop(handle),
             WM_EXITSIZEMOVE | WM_EXITMENULOOP => self.handle_size_move_loop_exit(handle),
@@ -215,6 +219,11 @@ impl WindowsWindowInner {
                 )?);
             }
         }
+        self.post_window_message(handle, WM_GPUI_WINDOW_MOVED);
+        Some(0)
+    }
+
+    fn handle_deferred_move(&self) -> Option<isize> {
         if let Some(mut callback) = self.state.callbacks.moved.take() {
             callback();
             self.state.callbacks.moved.set(Some(callback));
@@ -259,7 +268,12 @@ impl WindowsWindowInner {
         Some(0)
     }
 
-    fn handle_size_msg(self: &Rc<Self>, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
+    fn handle_size_msg(
+        self: &Rc<Self>,
+        handle: HWND,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> Option<isize> {
         // Minimizing and restoring both arrive as `WM_SIZE`; the deferred report
         // reads `IsIconic` at delivery, so one call covers both directions.
         self.report_visibility();
@@ -288,12 +302,13 @@ impl WindowsWindowInner {
             should_resize_renderer = true;
         }
 
-        self.handle_size_change(new_size, scale_factor, should_resize_renderer);
+        self.handle_size_change(handle, new_size, scale_factor, should_resize_renderer);
         Some(0)
     }
 
     fn handle_size_change(
         &self,
+        handle: HWND,
         device_size: Size<DevicePixels>,
         scale_factor: f32,
         should_resize_renderer: bool,
@@ -309,9 +324,29 @@ impl WindowsWindowInner {
                 .invalidate_devices
                 .store(true, std::sync::atomic::Ordering::Release);
         }
+        self.post_window_message(handle, WM_GPUI_WINDOW_RESIZED);
+    }
+
+    fn handle_deferred_resize(&self) -> Option<isize> {
         if let Some(mut callback) = self.state.callbacks.resize.take() {
-            callback(new_logical_size, scale_factor);
+            callback(self.state.logical_size.get(), self.state.scale_factor.get());
             self.state.callbacks.resize.set(Some(callback));
+        }
+        Some(0)
+    }
+
+    fn post_window_message(&self, handle: HWND, message: u32) {
+        // SetWindowPlacement can send WM_MOVE and WM_SIZE while GPUI already
+        // holds AppCell. Keep platform state current, then notify GPUI after
+        // the synchronous Win32 callback has returned.
+        unsafe {
+            PostMessageW(
+                Some(handle),
+                message,
+                WPARAM(self.validation_number),
+                LPARAM(0),
+            )
+            .log_err();
         }
     }
 
@@ -956,7 +991,7 @@ impl WindowsWindowInner {
                 // SetWindowPos may not send WM_SIZE for maximized windows in some cases,
                 // so we manually update the size to ensure proper rendering
                 let device_size = size(DevicePixels(width), DevicePixels(height));
-                self.handle_size_change(device_size, new_scale_factor, true);
+                self.handle_size_change(handle, device_size, new_scale_factor, true);
             }
         } else {
             // For non-maximized windows, use the suggested RECT from the system
@@ -1324,7 +1359,15 @@ impl WindowsWindowInner {
     ) -> Option<isize> {
         self.report_visibility();
         if wparam.0 == 1 {
-            self.draw_window(handle, false);
+            unsafe {
+                PostMessageW(
+                    Some(handle),
+                    WM_GPUI_FORCE_UPDATE_WINDOW,
+                    WPARAM(self.validation_number),
+                    LPARAM(0),
+                )
+                .log_err();
+            }
         }
         None
     }

@@ -1187,6 +1187,7 @@ impl LinuxClient for WaylandClient {
         let appearance = state.common.appearance;
         let compositor_gpu = state.compositor_gpu.take();
 
+        let should_activate = params.focus;
         let (window, surface_id) = WaylandWindow::new(
             handle,
             state.globals.clone(),
@@ -1200,7 +1201,7 @@ impl LinuxClient for WaylandClient {
             target_output,
         )?;
 
-        if window.0.toplevel().is_some() {
+        if should_activate && window.0.toplevel().is_some() {
             state.consume_startup_activation_token(&window.0.surface());
         }
         state.windows.insert(surface_id, window.0.clone());

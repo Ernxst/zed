@@ -639,7 +639,14 @@ impl Scene {
                     left_id
                         .plane
                         .cmp(&right_id.plane)
-                        .then_with(|| group_stacking[left].cmp(&group_stacking[right]))
+                        .then_with(|| {
+                            compare_stacking_orders(
+                                &group_stacking[left],
+                                &group_stacking[right],
+                                left_id.phase,
+                                right_id.phase,
+                            )
+                        })
                         .then_with(|| left_id.phase.cmp(&right_id.phase))
                 });
                 self.cached_paint_order_groups = sorted_groups
@@ -735,6 +742,60 @@ impl Scene {
             surfaces_iter: self.surfaces.iter().peekable(),
         }
     }
+}
+
+fn compare_stacking_orders(
+    left: &[StackingOrder],
+    right: &[StackingOrder],
+    left_paint_phase: u8,
+    right_paint_phase: u8,
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    for (left_order, right_order) in left.iter().zip(right) {
+        if left_order == right_order {
+            continue;
+        }
+
+        let source_orders_are_nested = left_order
+            .source_order
+            .starts_with(&right_order.source_order)
+            || right_order
+                .source_order
+                .starts_with(&left_order.source_order);
+        let same_slot = left_order.phase == right_order.phase
+            && left_order.z_index == right_order.z_index
+            && source_orders_are_nested;
+        if same_slot {
+            let left_source = left.last().map(|order| &order.source_order);
+            let right_source = right.last().map(|order| &order.source_order);
+            if let (Some(left_source), Some(right_source)) = (left_source, right_source) {
+                let left_is_ancestor =
+                    right_source.starts_with(left_source) && right_source.len() > left_source.len();
+                let right_is_ancestor =
+                    left_source.starts_with(right_source) && left_source.len() > right_source.len();
+                if left_is_ancestor || right_is_ancestor {
+                    // An element's background and content precede its positioned
+                    // descendants, while its outline follows them. Siblings still
+                    // use their retained source order below.
+                    let ancestor_phase = if left_is_ancestor {
+                        left_paint_phase
+                    } else {
+                        right_paint_phase
+                    };
+                    let ancestor_before_descendant = ancestor_phase < 2;
+                    return match (left_is_ancestor, ancestor_before_descendant) {
+                        (true, true) | (false, false) => Ordering::Less,
+                        (true, false) | (false, true) => Ordering::Greater,
+                    };
+                }
+            }
+        }
+
+        return left_order.cmp(right_order);
+    }
+
+    left.len().cmp(&right.len())
 }
 
 fn rebase_source_order(source_order: &[u32], old: &[u32], new: &[u32]) -> Arc<[u32]> {
@@ -1853,6 +1914,136 @@ mod tests {
             .map(|sprite| sprite.tile.tile_id.0)
             .collect();
         assert_eq!(painted, [1, 2, 3]);
+    }
+
+    #[test]
+    fn positioned_child_paints_over_its_ancestor_border() {
+        let mut scene = Scene::default();
+        let clip_id = scene.insert_clip(ClipNode {
+            folded_bounds: bounds(0., 0., 100., 100.),
+            rounded_bounds: Default::default(),
+            corner_radii: Default::default(),
+            rounded_head: ClipNode::NONE,
+            parent_rounded: ClipNode::NONE,
+        });
+        let glyph = |tile_id| MonochromeSprite {
+            order: 0,
+            clip_id,
+            bounds: bounds(0., 0., 10., 18.),
+            color: Default::default(),
+            tile: AtlasTile {
+                texture_id: AtlasTextureId {
+                    index: 0,
+                    kind: crate::AtlasTextureKind::Monochrome,
+                },
+                tile_id: crate::TileId(tile_id),
+                padding: 0,
+                bounds: Default::default(),
+            },
+            transformation: TransformationMatrix::unit(),
+        };
+
+        scene.push_stacking_element(vec![0], 2, 0, false);
+        scene.set_paint_phase(0);
+        scene.insert_primitive(glyph(1)); // Ancestor border, painted with decoration.
+        scene.push_stacking_element(vec![0, 0], 2, 0, false);
+        scene.set_paint_phase(0);
+        scene.insert_primitive(glyph(2)); // Positioned child overlaps the border.
+        scene.pop_stacking_order();
+        scene.pop_stacking_order();
+        scene.finish();
+
+        let painted: Vec<u32> = scene
+            .monochrome_sprites
+            .iter()
+            .map(|sprite| sprite.tile.tile_id.0)
+            .collect();
+        assert_eq!(painted, [1, 2]);
+    }
+
+    #[test]
+    fn rounded_overflow_parent_paints_decoration_before_its_filling_child() {
+        let mut scene = Scene::default();
+        let clip_id = scene.insert_clip(ClipNode {
+            folded_bounds: bounds(0., 0., 100., 100.),
+            rounded_bounds: bounds(0., 0., 100., 100.),
+            corner_radii: Corners::all(ScaledPixels(24.)),
+            rounded_head: 0,
+            parent_rounded: ClipNode::NONE,
+        });
+        let full_bounds_quad = |clip_id, color| Quad {
+            order: 0,
+            clip_id,
+            bounds: bounds(0., 0., 100., 100.),
+            background: color.into(),
+            corner_radii: Corners::all(ScaledPixels(24.)),
+            border_widths: Edges::default(),
+            border_color: Default::default(),
+            border_style: BorderStyle::default(),
+        };
+
+        scene.push_stacking_element(vec![0], 1, 0, false);
+        scene.set_paint_phase(0);
+        scene.insert_primitive(full_bounds_quad(clip_id, Hsla::red()));
+        scene.push_stacking_element(vec![0, 0], 1, 0, false);
+        scene.set_paint_phase(1);
+        scene.insert_primitive(full_bounds_quad(clip_id, Hsla::blue()));
+        scene.pop_stacking_order();
+        scene.pop_stacking_order();
+        scene.finish();
+
+        assert_eq!(scene.quads.len(), 2);
+        assert_eq!(scene.quads[0].background, Hsla::red().into());
+        assert_eq!(scene.quads[1].background, Hsla::blue().into());
+        assert_eq!(scene.quads[0].clip_id, clip_id);
+        assert_eq!(scene.quads[1].clip_id, clip_id);
+    }
+
+    #[test]
+    fn ancestor_outline_paints_over_a_positioned_descendant() {
+        let mut scene = Scene::default();
+        let clip_id = scene.insert_clip(ClipNode {
+            folded_bounds: bounds(0., 0., 100., 100.),
+            rounded_bounds: Default::default(),
+            corner_radii: Default::default(),
+            rounded_head: ClipNode::NONE,
+            parent_rounded: ClipNode::NONE,
+        });
+        let glyph = |tile_id| MonochromeSprite {
+            order: 0,
+            clip_id,
+            bounds: bounds(0., 0., 10., 18.),
+            color: Default::default(),
+            tile: AtlasTile {
+                texture_id: AtlasTextureId {
+                    index: 0,
+                    kind: crate::AtlasTextureKind::Monochrome,
+                },
+                tile_id: crate::TileId(tile_id),
+                padding: 0,
+                bounds: Default::default(),
+            },
+            transformation: TransformationMatrix::unit(),
+        };
+
+        // Positioned descendants paint their contents after an ancestor's
+        // outline, even when the ancestor is also positioned with z-index:auto.
+        scene.push_stacking_element(vec![0], 2, 0, false);
+        scene.push_stacking_element(vec![0, 0], 2, 0, false);
+        scene.set_paint_phase(0);
+        scene.insert_primitive(glyph(1));
+        scene.pop_stacking_order();
+        scene.set_paint_phase(2);
+        scene.insert_primitive(glyph(2));
+        scene.pop_stacking_order();
+        scene.finish();
+
+        let painted: Vec<u32> = scene
+            .monochrome_sprites
+            .iter()
+            .map(|sprite| sprite.tile.tile_id.0)
+            .collect();
+        assert_eq!(painted, [1, 2]);
     }
 
     #[test]
