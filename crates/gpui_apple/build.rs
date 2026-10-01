@@ -127,6 +127,10 @@ mod macos_build {
     #[cfg(not(feature = "runtime_shaders"))]
     fn compile_metal_shaders(header_path: &Path) {
         use std::process::{self, Command};
+        println!("cargo:rerun-if-env-changed=PATH");
+        println!("cargo:rerun-if-env-changed=DEVELOPER_DIR");
+        println!("cargo:rerun-if-env-changed=TOOLCHAINS");
+
         let shader_path = "./src/shaders.metal";
         let air_output_path = PathBuf::from(env::var("OUT_DIR").unwrap()).join("shaders.air");
         let metallib_output_path =

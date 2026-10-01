@@ -19,6 +19,9 @@ mod shader_compilation {
     };
 
     pub fn compile_shaders() {
+        println!("cargo:rerun-if-env-changed=GPUI_FXC_PATH");
+        println!("cargo:rerun-if-env-changed=PATH");
+
         let shader_path =
             PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("src/shaders.hlsl");
         let out_dir = std::env::var("OUT_DIR").unwrap();
