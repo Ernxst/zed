@@ -1003,8 +1003,8 @@ impl HitboxOrderKey {
             })
             .then_with(|| self_contexts.cmp(other_contexts))
             .then_with(|| self.stacking_stack.cmp(&other.stacking_stack))
-            .then_with(|| self.identity_order.cmp(&other.identity_order))
             .then_with(|| self.insertion_ordinal.cmp(&other.insertion_ordinal))
+            .then_with(|| self.identity_order.cmp(&other.identity_order))
     }
 }
 
@@ -1511,7 +1511,7 @@ mod hitbox_order_tests {
     }
 
     #[test]
-    fn ordinary_ancestor_keys_with_conflicting_insertion_order_sort_consistently() {
+    fn ordinary_hitboxes_with_equal_stacking_keys_follow_insertion_order() {
         let stack = stacking_stack(&[]);
         let keys = [
             HitboxOrderKey {
@@ -1546,12 +1546,12 @@ mod hitbox_order_tests {
                 .map(|key| key.identity_order.as_ref().unwrap().clone())
                 .collect::<Vec<_>>(),
             [
-                vec![String::from("Integer(00000000000000000001)")],
                 vec![
                     String::from("Integer(00000000000000000001)"),
                     String::from("Integer(00000000000000000003)"),
                 ],
                 vec![String::from("Integer(00000000000000000002)")],
+                vec![String::from("Integer(00000000000000000001)")],
             ]
         );
     }
