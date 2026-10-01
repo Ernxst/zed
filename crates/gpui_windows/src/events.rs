@@ -161,7 +161,15 @@ impl WindowsWindowInner {
             WM_INPUTLANGCHANGE => self.handle_input_language_changed(),
             WM_SHOWWINDOW => self.handle_window_visibility_changed(handle, wparam),
             WM_GPUI_CURSOR_STYLE_CHANGED => self.handle_cursor_changed(lparam),
-            WM_GPUI_FORCE_UPDATE_WINDOW => self.draw_window(handle, true),
+            WM_GPUI_FORCE_UPDATE_WINDOW => {
+                if std::env::var_os("GPU_IX_TRACE_APP_BORROW").is_some() {
+                    eprintln!(
+                        "[GPU-IX-WINDOW-FORCED-DRAW] active_mutable_borrows={:?}",
+                        gpui::debug_active_mutable_app_borrows()
+                    );
+                }
+                self.draw_window(handle, true)
+            }
             WM_GPUI_GPU_DEVICE_LOST => self.handle_device_lost(lparam),
             DM_POINTERHITTEST => self.handle_dm_pointer_hit_test(wparam),
             WM_GETOBJECT => self.handle_wm_getobject(wparam, lparam),
@@ -1336,7 +1344,15 @@ impl WindowsWindowInner {
                     gpui::debug_active_mutable_app_borrows()
                 );
             }
-            self.draw_window(handle, false);
+            unsafe {
+                PostMessageW(
+                    Some(handle),
+                    WM_GPUI_FORCE_UPDATE_WINDOW,
+                    WPARAM(self.validation_number),
+                    LPARAM(0),
+                )
+                .log_err();
+            }
         }
         None
     }

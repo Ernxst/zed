@@ -2160,62 +2160,22 @@ impl Window {
                     .log_err();
             }
         }));
-        #[cfg(target_os = "windows")]
-        {
-            // Win32 sends WM_SIZE and WM_MOVE synchronously from SetWindowPlacement/SetWindowPos.
-            // Those messages can arrive while an AsyncApp::update_window borrow is active, so
-            // updating GPUI's Window from their callbacks would try to borrow AppCell again.
-            // Queue one bounds refresh after the current update returns.
-            let cx = cx.to_async();
-            let foreground_executor = cx.foreground_executor().clone();
-            let bounds_update_pending = Rc::new(Cell::new(false));
-            let schedule_bounds_changed = Rc::new({
-                let handle = handle.clone();
-                let cx = cx.clone();
-                let foreground_executor = foreground_executor.clone();
-                let bounds_update_pending = bounds_update_pending.clone();
-                move || {
-                    if bounds_update_pending.replace(true) {
-                        return;
-                    }
-
-                    let mut cx = cx.clone();
-                    let bounds_update_pending = bounds_update_pending.clone();
-                    foreground_executor
-                        .spawn(async move {
-                            handle
-                                .update(&mut cx, |_, window, cx| window.bounds_changed(cx))
-                                .log_err();
-                            bounds_update_pending.set(false);
-                        })
-                        .detach();
-                }
-            });
-            platform_window.on_resize(Box::new({
-                let schedule_bounds_changed = schedule_bounds_changed.clone();
-                move |_, _| schedule_bounds_changed()
-            }));
-            platform_window.on_moved(Box::new(move || schedule_bounds_changed()));
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            platform_window.on_resize(Box::new({
-                let mut cx = cx.to_async();
-                move |_, _| {
-                    handle
-                        .update(&mut cx, |_, window, cx| window.bounds_changed(cx))
-                        .log_err();
-                }
-            }));
-            platform_window.on_moved(Box::new({
-                let mut cx = cx.to_async();
-                move || {
-                    handle
-                        .update(&mut cx, |_, window, cx| window.bounds_changed(cx))
-                        .log_err();
-                }
-            }));
-        }
+        platform_window.on_resize(Box::new({
+            let mut cx = cx.to_async();
+            move |_, _| {
+                handle
+                    .update(&mut cx, |_, window, cx| window.bounds_changed(cx))
+                    .log_err();
+            }
+        }));
+        platform_window.on_moved(Box::new({
+            let mut cx = cx.to_async();
+            move || {
+                handle
+                    .update(&mut cx, |_, window, cx| window.bounds_changed(cx))
+                    .log_err();
+            }
+        }));
         platform_window.on_appearance_changed(Box::new({
             let cx = cx.to_async();
             let foreground_executor = cx.foreground_executor().clone();
