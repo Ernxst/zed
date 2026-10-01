@@ -1458,7 +1458,7 @@ mod tests {
                 ..Default::default()
             }
             .with_len(clamped_text.len());
-            let mut wrapper = text_system.line_wrapper(&clamped_run, px(18.));
+            let mut wrapper = text_system.line_wrapper(font("Helvetica"), px(18.));
             let (truncated, _) = wrapper.truncate_wrapped_line(
                 clamped_text.into(),
                 px(150.),
@@ -1484,12 +1484,13 @@ mod tests {
                 )
                 .unwrap();
             let balanced_width = balanced_prefix[0].layout.wrap_width.unwrap();
+            let clamped_runs = [clamped_run.clone()];
             let (balanced_truncated, balanced_runs) = wrapper.truncate_wrapped_line(
                 clamped_text.into(),
                 balanced_width,
                 2,
                 "…",
-                &[clamped_run.clone()],
+                &clamped_runs,
                 TruncateFrom::End,
             );
             assert!(balanced_truncated.ends_with('…'));

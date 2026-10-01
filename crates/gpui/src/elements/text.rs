@@ -848,22 +848,75 @@ impl TextLayout {
                     && text_style.text_wrap == TextWrap::Balance
                     && let (Some(max_lines), Some(wrap_width), Some(_)) =
                         (text_style.line_clamp, wrap_width, balance_range)
-                    && let Some(balanced_width) = lines
+                    && let Some((ellipsis_group_ix, balanced_width)) = lines
                         .iter()
-                        .find(|line| {
+                        .enumerate()
+                        .find(|(_, line)| {
                             line.text.ends_with(truncation_affix.as_ref())
                                 || line.text.starts_with(truncation_affix.as_ref())
                         })
-                        .and_then(|line| line.layout.wrap_width)
+                        .and_then(|(ix, line)| line.layout.wrap_width.map(|width| (ix, width)))
                 {
-                    let (balanced_text, balanced_runs) = line_wrapper.truncate_wrapped_line(
-                        original_text.clone(),
-                        balanced_width,
-                        max_lines,
-                        &truncation_affix,
-                        &original_runs,
-                        truncate_from,
-                    );
+                    let (balanced_text, balanced_runs) = if truncate_from == TruncateFrom::End {
+                        // Keep already-balanced forced-break groups intact. Only the group that
+                        // contains the ellipsis is being truncated again; applying its width to
+                        // the entire string can make an earlier, wider group consume extra clamp
+                        // lines and move the ellipsis backwards.
+                        let group_start = original_text
+                            .match_indices('\n')
+                            .nth(ellipsis_group_ix.saturating_sub(1))
+                            .filter(|_| ellipsis_group_ix > 0)
+                            .map_or(0, |(ix, _)| ix + 1);
+                        let lines_before_group = lines[..ellipsis_group_ix]
+                            .iter()
+                            .map(|line| line.layout.wrap_boundaries().len() + 1)
+                            .sum::<usize>();
+                        let remaining_lines = max_lines.saturating_sub(lines_before_group).max(1);
+                        let slice_runs = |range: Range<usize>| {
+                            let mut run_start = 0;
+                            original_runs
+                                .iter()
+                                .filter_map(|run| {
+                                    let run_end = run_start + run.len;
+                                    let selected_start = run_start.max(range.start);
+                                    let selected_end = run_end.min(range.end);
+                                    run_start = run_end;
+                                    (selected_start < selected_end).then(|| {
+                                        let mut run = run.clone();
+                                        run.len = selected_end - selected_start;
+                                        run
+                                    })
+                                })
+                                .collect::<Vec<_>>()
+                        };
+                        let prefix_runs = slice_runs(0..group_start);
+                        let group_runs = slice_runs(group_start..original_text.len());
+                        let (group_text, group_runs) = line_wrapper.truncate_wrapped_line(
+                            original_text[group_start..].into(),
+                            balanced_width,
+                            remaining_lines,
+                            &truncation_affix,
+                            &group_runs,
+                            truncate_from,
+                        );
+                        let balanced_text = SharedString::from(format!(
+                            "{}{}",
+                            &original_text[..group_start],
+                            group_text
+                        ));
+                        let mut balanced_runs = prefix_runs;
+                        balanced_runs.extend(group_runs.iter().cloned());
+                        (balanced_text, Cow::Owned(balanced_runs))
+                    } else {
+                        line_wrapper.truncate_wrapped_line(
+                            original_text.clone(),
+                            balanced_width,
+                            max_lines,
+                            &truncation_affix,
+                            &original_runs,
+                            truncate_from,
+                        )
+                    };
                     if balanced_text != text {
                         let balance_range = match truncate_from {
                             TruncateFrom::End
