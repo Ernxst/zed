@@ -191,6 +191,7 @@ impl Scene {
         self.current_stacking_phase = stacking_phase;
         if context {
             self.stacking_stack.push(StackingOrder {
+                context: true,
                 z_index,
                 source_order,
                 phase: stacking_phase,
@@ -200,6 +201,7 @@ impl Scene {
             // enclosing context. Its ordinary descendants stay in that slot;
             // positioned and context descendants replace it when they enter.
             self.slot_owner = Some(StackingOrder {
+                context: false,
                 z_index: 0,
                 source_order,
                 phase: stacking_phase,
@@ -250,6 +252,7 @@ impl Scene {
             order.push(slot_owner.clone());
         }
         order.push(StackingOrder {
+            context: false,
             phase: self.current_stacking_phase,
             z_index: 0,
             source_order: self.current_source_order.clone(),
@@ -310,6 +313,19 @@ impl Scene {
 
     pub(crate) fn current_stacking_order(&self) -> Arc<[StackingOrder]> {
         self.current_stacking_order.clone()
+    }
+
+    pub(crate) fn current_hitbox_stacking_order(&mut self) -> Arc<[StackingOrder]> {
+        let Some(current_element) = self.current_stacking_order.last() else {
+            return self.current_stacking_order.clone();
+        };
+        if current_element.context || current_element.phase == 1 {
+            return self.current_stacking_order.clone();
+        }
+
+        let mut order = self.current_stacking_order.to_vec();
+        order.last_mut().unwrap().phase = 1;
+        self.intern_stacking_order(order).0
     }
 
     pub(crate) fn stacking_state(&self) -> StackingState {
@@ -798,6 +814,8 @@ fn compare_stacking_orders(
     left.len().cmp(&right.len())
 }
 
+/// Compare stacking paths for hitboxes, whose ordering follows the element's
+/// source position when one hitbox belongs to an ancestor of the other.
 fn rebase_source_order(source_order: &[u32], old: &[u32], new: &[u32]) -> Arc<[u32]> {
     if source_order.starts_with(old) {
         Arc::from(
@@ -816,6 +834,7 @@ pub(crate) struct StackingOrder {
     phase: u8,
     z_index: i32,
     source_order: Arc<[u32]>,
+    pub(crate) context: bool,
 }
 
 /// A paint-order position suitable for resolving overlap in a non-scene registry.
@@ -1667,6 +1686,19 @@ impl PathVertex<Pixels> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn hitbox_stacking_order_reuses_normalized_keys() {
+        let mut scene = Scene::default();
+        scene.push_stacking_element([], 2, 0, false);
+
+        let first = scene.current_hitbox_stacking_order();
+        let second = scene.current_hitbox_stacking_order();
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first[0].phase, 2);
+        assert_eq!(first[1].phase, 1);
+    }
+
     fn bounds(x: f32, y: f32, width: f32, height: f32) -> Bounds<ScaledPixels> {
         Bounds {
             origin: point(ScaledPixels(x), ScaledPixels(y)),
@@ -1974,9 +2006,9 @@ mod tests {
         let full_bounds_quad = |clip_id: u32, color: Hsla| Quad {
             order: 0,
             clip_id,
-            pad: 0,
             bounds: bounds(0., 0., 100., 100.),
             background: color.into(),
+            pad: 0,
             corner_radii: Corners::all(ScaledPixels(24.)),
             border_widths: Edges::default(),
             border_color: Default::default(),

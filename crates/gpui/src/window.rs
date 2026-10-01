@@ -963,12 +963,24 @@ pub struct Hitbox {
     pub(crate) insertion_ordinal: u64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct HitboxOrderKey {
     identity: Option<GlobalElementId>,
+    identity_order: Option<Vec<String>>,
     stacking_stack: std::sync::Arc<[crate::scene::StackingOrder]>,
     paint_plane: usize,
     insertion_ordinal: u64,
+}
+
+fn hitbox_identity_order(identity: &GlobalElementId) -> Vec<String> {
+    identity
+        .0
+        .iter()
+        .map(|part| match part {
+            ElementId::Integer(value) => format!("Integer({value:020})"),
+            _ => format!("{part:?}"),
+        })
+        .collect()
 }
 
 impl HitboxOrderKey {
@@ -977,6 +989,14 @@ impl HitboxOrderKey {
             && std::sync::Arc::ptr_eq(&self.stacking_stack, &hitbox.stacking_stack)
             && self.paint_plane == hitbox.paint_plane
             && self.insertion_ordinal == hitbox.insertion_ordinal
+    }
+
+    fn compare(&self, other: &Self) -> std::cmp::Ordering {
+        self.paint_plane
+            .cmp(&other.paint_plane)
+            .then_with(|| self.stacking_stack.cmp(&other.stacking_stack))
+            .then_with(|| self.insertion_ordinal.cmp(&other.insertion_ordinal))
+            .then_with(|| self.identity_order.cmp(&other.identity_order))
     }
 }
 
@@ -1376,54 +1396,338 @@ impl Frame {
             return;
         }
         self.hit_order = (0..self.hitboxes.len()).collect();
-        self.hit_order.sort_by(|&left, &right| {
-            let left_hitbox = &self.hitboxes[left];
-            let right_hitbox = &self.hitboxes[right];
-            let left_identity = left_hitbox.identity.as_ref().map(|identity| &identity.0);
-            let right_identity = right_hitbox.identity.as_ref().map(|identity| &identity.0);
-
-            // A container's hitbox covers its descendants, but the container
-            // must not shield a child merely because its own position places
-            // it in a later paint phase.
-            let descendant_order = match (left_identity, right_identity) {
-                (Some(left), Some(right))
-                    if left.len() < right.len() && right.starts_with(left) =>
-                {
-                    std::cmp::Ordering::Less
-                }
-                (Some(left), Some(right))
-                    if right.len() < left.len() && left.starts_with(right) =>
-                {
-                    std::cmp::Ordering::Greater
-                }
-                _ => std::cmp::Ordering::Equal,
-            };
-
-            descendant_order.then_with(|| {
-                (
-                    left_hitbox.paint_plane,
-                    &left_hitbox.stacking_stack,
-                    left_hitbox.insertion_ordinal,
-                )
-                    .cmp(&(
-                        right_hitbox.paint_plane,
-                        &right_hitbox.stacking_stack,
-                        right_hitbox.insertion_ordinal,
-                    ))
-            })
-        });
         self.hit_order_keys = self
             .hitboxes
             .iter()
             .map(|hitbox| HitboxOrderKey {
                 identity: hitbox.identity.clone(),
+                identity_order: hitbox
+                    .identity
+                    .as_ref()
+                    .map(|identity| hitbox_identity_order(identity)),
                 stacking_stack: hitbox.stacking_stack.clone(),
                 paint_plane: hitbox.paint_plane,
                 insertion_ordinal: hitbox.insertion_ordinal,
             })
             .collect();
+        self.hit_order.sort_by(|&left, &right| {
+            self.hit_order_keys[left].compare(&self.hit_order_keys[right])
+        });
         self.hit_order_cache.clone_from(&self.hit_order);
         self.hit_order_dirty = false;
+    }
+}
+
+#[cfg(test)]
+mod hitbox_order_tests {
+    use super::{HitboxOrderKey, hitbox_identity_order};
+    use crate::{ElementId, GlobalElementId, scene::Scene};
+    use std::sync::Arc;
+
+    fn identity(path: &[u64]) -> Option<GlobalElementId> {
+        (!path.is_empty()).then(|| {
+            GlobalElementId(Arc::from(
+                path.iter()
+                    .copied()
+                    .map(ElementId::Integer)
+                    .collect::<Vec<_>>(),
+            ))
+        })
+    }
+
+    fn stacking_stack(path: &[(i32, u32)]) -> Arc<[crate::scene::StackingOrder]> {
+        let mut scene = Scene::default();
+        for (index, &(z_index, source_order)) in path.iter().enumerate() {
+            scene.push_stacking_context(z_index, [source_order + index as u32]);
+        }
+        scene.current_stacking_order()
+    }
+
+    fn positioned_auto_stacking_stack(source_order: u32) -> Arc<[crate::scene::StackingOrder]> {
+        let mut scene = Scene::default();
+        scene.push_stacking_context(0, [0]);
+        scene.push_stacking_element([source_order], 2, 0, false);
+        let stack = scene.current_stacking_order();
+        scene.pop_stacking_order();
+        scene.pop_stacking_order();
+        stack
+    }
+
+    fn ordinary_stacking_stack(source_order: u32) -> Arc<[crate::scene::StackingOrder]> {
+        let mut scene = Scene::default();
+        scene.push_stacking_context(0, [0]);
+        scene.push_stacking_container([source_order]);
+        let stack = scene.current_stacking_order();
+        scene.pop_stacking_order();
+        scene.pop_stacking_order();
+        stack
+    }
+
+    fn non_context_stacking_stack(path: &[(u8, u32)]) -> Arc<[crate::scene::StackingOrder]> {
+        let mut scene = Scene::default();
+        for &(phase, source_order) in path {
+            scene.push_stacking_element([source_order], phase, 0, false);
+        }
+        let stack = scene.current_stacking_order();
+        for _ in path {
+            scene.pop_stacking_order();
+        }
+        stack
+    }
+
+    fn mixed_stacking_stack(path: &[(bool, u8, i32, u32)]) -> Arc<[crate::scene::StackingOrder]> {
+        let mut scene = Scene::default();
+        for &(context, phase, z_index, source_order) in path {
+            scene.push_stacking_element([source_order], phase, z_index, context);
+        }
+        let stack = scene.current_stacking_order();
+        for _ in path {
+            scene.pop_stacking_order();
+        }
+        stack
+    }
+
+    fn non_context_stack_at(phase: u8, source_order: &[u32]) -> Arc<[crate::scene::StackingOrder]> {
+        let mut scene = Scene::default();
+        scene.push_stacking_element(source_order.to_vec(), phase, 0, false);
+        scene.current_stacking_order()
+    }
+
+    #[test]
+    fn ordinary_nested_hitboxes_with_different_paint_planes_have_a_total_order() {
+        let stack = stacking_stack(&[]);
+        let keys = [
+            HitboxOrderKey {
+                identity: None,
+                identity_order: None,
+                stacking_stack: stack.clone(),
+                paint_plane: 1,
+                insertion_ordinal: 1,
+            },
+            HitboxOrderKey {
+                identity: identity(&[1]),
+                identity_order: identity(&[1]).as_ref().map(hitbox_identity_order),
+                stacking_stack: stack.clone(),
+                paint_plane: 1,
+                insertion_ordinal: 13,
+            },
+            HitboxOrderKey {
+                identity: identity(&[1, 2]),
+                identity_order: identity(&[1, 2]).as_ref().map(hitbox_identity_order),
+                stacking_stack: stack,
+                paint_plane: 0,
+                insertion_ordinal: 24,
+            },
+        ];
+
+        let mut sorted = keys.clone();
+        sorted.sort_by(HitboxOrderKey::compare);
+        assert!(
+            sorted
+                .windows(2)
+                .all(|pair| pair[0].compare(&pair[1]).is_le())
+        );
+        assert_eq!(sorted[0].identity_order, keys[2].identity_order);
+        assert_eq!(sorted[1].identity_order, keys[0].identity_order);
+        assert_eq!(sorted[2].identity_order, keys[1].identity_order);
+    }
+
+    #[test]
+    fn ordinary_hitboxes_with_equal_stacking_keys_follow_insertion_order() {
+        let stack = stacking_stack(&[]);
+        let keys = [
+            HitboxOrderKey {
+                identity: identity(&[2]),
+                identity_order: identity(&[2]).as_ref().map(hitbox_identity_order),
+                stacking_stack: stack.clone(),
+                paint_plane: 0,
+                insertion_ordinal: 1,
+            },
+            HitboxOrderKey {
+                identity: identity(&[1]),
+                identity_order: identity(&[1]).as_ref().map(hitbox_identity_order),
+                stacking_stack: stack.clone(),
+                paint_plane: 0,
+                insertion_ordinal: 2,
+            },
+            HitboxOrderKey {
+                identity: identity(&[1, 3]),
+                identity_order: identity(&[1, 3]).as_ref().map(hitbox_identity_order),
+                stacking_stack: stack,
+                paint_plane: 0,
+                insertion_ordinal: 0,
+            },
+        ];
+
+        let mut sorted = keys.clone();
+        sorted.sort_by(HitboxOrderKey::compare);
+
+        assert_eq!(
+            sorted
+                .iter()
+                .map(|key| key.identity_order.as_ref().unwrap().clone())
+                .collect::<Vec<_>>(),
+            [
+                vec![
+                    String::from("Integer(00000000000000000001)"),
+                    String::from("Integer(00000000000000000003)"),
+                ],
+                vec![String::from("Integer(00000000000000000002)")],
+                vec![String::from("Integer(00000000000000000001)")],
+            ]
+        );
+    }
+
+    #[test]
+    fn positioned_auto_siblings_follow_their_paint_source_order() {
+        let earlier_painted = HitboxOrderKey {
+            identity: identity(&[2]),
+            identity_order: identity(&[2]).as_ref().map(hitbox_identity_order),
+            stacking_stack: positioned_auto_stacking_stack(1),
+            paint_plane: 0,
+            insertion_ordinal: 1,
+        };
+        let later_painted = HitboxOrderKey {
+            identity: identity(&[1]),
+            identity_order: identity(&[1]).as_ref().map(hitbox_identity_order),
+            stacking_stack: positioned_auto_stacking_stack(2),
+            paint_plane: 0,
+            insertion_ordinal: 2,
+        };
+
+        assert!(earlier_painted.compare(&later_painted).is_lt());
+    }
+
+    #[test]
+    fn ordinary_siblings_follow_their_paint_source_order_when_identities_are_reversed() {
+        let earlier_painted = HitboxOrderKey {
+            identity: identity(&[2]),
+            identity_order: identity(&[2]).as_ref().map(hitbox_identity_order),
+            stacking_stack: ordinary_stacking_stack(1),
+            paint_plane: 0,
+            insertion_ordinal: 1,
+        };
+        let later_painted = HitboxOrderKey {
+            identity: identity(&[1]),
+            identity_order: identity(&[1]).as_ref().map(hitbox_identity_order),
+            stacking_stack: ordinary_stacking_stack(2),
+            paint_plane: 0,
+            insertion_ordinal: 2,
+        };
+
+        assert!(earlier_painted.compare(&later_painted).is_lt());
+    }
+
+    #[test]
+    fn ancestor_hitbox_precedes_ordinary_descendant_even_when_phases_differ() {
+        let mut scene = Scene::default();
+        scene.push_stacking_element([], 2, 0, false);
+        let ancestor = HitboxOrderKey {
+            identity: identity(&[1]),
+            identity_order: identity(&[1]).as_ref().map(hitbox_identity_order),
+            stacking_stack: scene.current_hitbox_stacking_order(),
+            paint_plane: 0,
+            insertion_ordinal: 1,
+        };
+        scene.push_stacking_element([0, 0], 1, 0, false);
+        let descendant = HitboxOrderKey {
+            identity: identity(&[1, 2]),
+            identity_order: identity(&[1, 2]).as_ref().map(hitbox_identity_order),
+            stacking_stack: scene.current_hitbox_stacking_order(),
+            paint_plane: 0,
+            insertion_ordinal: 2,
+        };
+
+        assert!(ancestor.compare(&descendant).is_lt());
+    }
+
+    #[test]
+    fn hitbox_order_is_a_total_order_for_generated_stacking_keys() {
+        let identities = [None, identity(&[1]), identity(&[1, 2]), identity(&[2])];
+        let stacks = [
+            stacking_stack(&[]),
+            stacking_stack(&[(i32::MIN, 0)]),
+            stacking_stack(&[(-1, 0)]),
+            stacking_stack(&[(0, 0)]),
+            stacking_stack(&[(0, 1)]),
+            stacking_stack(&[(1, 0)]),
+            stacking_stack(&[(i32::MAX, 0)]),
+            stacking_stack(&[(-1, 0), (-1, 1)]),
+            stacking_stack(&[(-1, 0), (0, 1)]),
+            stacking_stack(&[(-1, 0), (1, 1)]),
+            stacking_stack(&[(0, 0), (-1, 1)]),
+            stacking_stack(&[(0, 0), (0, 1)]),
+            stacking_stack(&[(0, 0), (1, 1)]),
+            stacking_stack(&[(1, 0), (-1, 1)]),
+            stacking_stack(&[(1, 0), (0, 1)]),
+            stacking_stack(&[(1, 0), (1, 1)]),
+            non_context_stacking_stack(&[(2, 0), (2, 0)]),
+            non_context_stacking_stack(&[(2, 0), (1, 1)]),
+            non_context_stacking_stack(&[(1, 0), (2, 1)]),
+            non_context_stacking_stack(&[(1, 0), (1, 1)]),
+            non_context_stacking_stack(&[(2, 0), (0, 1)]),
+            non_context_stacking_stack(&[(0, 0), (3, 1)]),
+            non_context_stacking_stack(&[(1, 0), (2, 1), (1, 2)]),
+            non_context_stacking_stack(&[(1, 0), (0, 1), (3, 2)]),
+            mixed_stacking_stack(&[(true, 1, -1, 0), (false, 2, 0, 1)]),
+            mixed_stacking_stack(&[(true, 1, 0, 0), (false, 1, 0, 1)]),
+            mixed_stacking_stack(&[(true, 2, 1, 0), (false, 2, 0, 1)]),
+            mixed_stacking_stack(&[(true, 1, 0, 0), (false, 1, 0, 1), (true, 3, 2, 2)]),
+            non_context_stack_at(1, &[2, 0]),
+            non_context_stack_at(2, &[1, 1]),
+            non_context_stack_at(2, &[2]),
+        ];
+        let mut keys = Vec::new();
+        for identity in &identities {
+            for stack in &stacks {
+                for paint_plane in 0..3 {
+                    let insertion_ordinal = keys.len() as u64;
+                    keys.push(HitboxOrderKey {
+                        identity: identity.clone(),
+                        identity_order: identity.as_ref().map(hitbox_identity_order),
+                        stacking_stack: stack.clone(),
+                        paint_plane,
+                        insertion_ordinal,
+                    });
+                }
+            }
+        }
+
+        for first in &keys {
+            for second in &keys {
+                let forward = first.compare(second);
+                let reverse = second.compare(first);
+                assert_eq!(
+                    forward,
+                    reverse.reverse(),
+                    "antisymmetry: {first:?} {second:?}"
+                );
+            }
+        }
+
+        for first in &keys {
+            for second in &keys {
+                if first.compare(second).is_gt() {
+                    continue;
+                }
+                for third in &keys {
+                    if second.compare(third).is_le() {
+                        assert!(
+                            first.compare(third).is_le(),
+                            "transitivity: {first:?} <= {second:?} <= {third:?}"
+                        );
+                    }
+                }
+            }
+        }
+
+        let mut sorted = keys.clone();
+        sorted.sort_by(HitboxOrderKey::compare);
+        assert!(
+            sorted
+                .windows(2)
+                .all(|pair| pair[0].compare(&pair[1]).is_le())
+        );
     }
 }
 
@@ -6181,7 +6485,7 @@ impl Window {
             rounded_masks,
             behavior,
             identity,
-            stacking_stack: self.next_frame.scene.current_stacking_order(),
+            stacking_stack: self.next_frame.scene.current_hitbox_stacking_order(),
             paint_plane: self.next_frame.scene.paint_plane(),
             insertion_ordinal: self.next_frame.hitboxes.len() as u64,
         };
