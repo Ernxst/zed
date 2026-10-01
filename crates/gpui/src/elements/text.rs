@@ -2,7 +2,7 @@ use crate::{
     ActiveTooltip, AnyView, App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId,
     HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, TextOverflow,
-    TextRun, TextStyle, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
+    TextRun, TextStyle, TextWrap, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
     WrappedLineLayout, px, register_tooltip_mouse_handlers, set_tooltip_on_window,
 };
 use anyhow::Context as _;
@@ -661,6 +661,8 @@ struct TextLayoutInner {
     lines: SmallVec<[WrappedLine; 1]>,
     line_height: Pixels,
     wrap_width: Option<Pixels>,
+    text_wrap: TextWrap,
+    line_clamp: Option<usize>,
     truncate_width: Option<Pixels>,
     size: Option<Size<Pixels>>,
     bounds: Option<Bounds<Pixels>>,
@@ -745,6 +747,8 @@ impl TextLayout {
                 if let Some(text_layout) = element_state.0.borrow().as_ref()
                     && let Some(size) = text_layout.size
                     && wrap_width == text_layout.wrap_width
+                    && text_style.text_wrap == text_layout.text_wrap
+                    && text_style.line_clamp == text_layout.line_clamp
                     && truncate_width.is_none()
                     && text_layout.truncate_width.is_none()
                 {
@@ -752,6 +756,8 @@ impl TextLayout {
                 }
 
                 let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
+                let original_text = text.clone();
+                let original_runs = runs.clone();
                 let (text, runs) = if let Some(truncate_width) = truncate_width {
                     if let Some(max_lines) = text_style.line_clamp
                         && let Some(wrap_width) = wrap_width
@@ -791,16 +797,32 @@ impl TextLayout {
                 } else {
                     (text.clone(), Cow::Borrowed(&*runs))
                 };
-                let len = text.len();
+                let balance_range = if text != original_text && !truncation_affix.is_empty() {
+                    match truncate_from {
+                        TruncateFrom::End if text.ends_with(truncation_affix.as_ref()) => {
+                            Some(0..text.len() - truncation_affix.len())
+                        }
+                        TruncateFrom::Start if text.starts_with(truncation_affix.as_ref()) => {
+                            Some(truncation_affix.len()..text.len())
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                let mut len = text.len();
 
-                let Some(lines) = window
+                let Some(mut lines) = window
                     .text_system()
-                    .shape_text(
-                        text,
+                    .shape_text_with_balance(
+                        text.clone(),
                         font_size,
                         &runs,
                         wrap_width,            // Wrap if we know the width.
                         text_style.line_clamp, // Limit the number of lines if line_clamp is set.
+                        text_style.text_wrap == TextWrap::Balance,
+                        balance_range.clone(),
+                        None,
                     )
                     .log_err()
                 else {
@@ -809,12 +831,127 @@ impl TextLayout {
                         len: 0,
                         line_height,
                         wrap_width,
+                        text_wrap: text_style.text_wrap,
+                        line_clamp: text_style.line_clamp,
                         truncate_width,
                         size: Some(Size::default()),
                         bounds: None,
                     });
                     return (Size::default(), None);
                 };
+
+                // The first pass balances the visible prefix without its truncation affix. Use
+                // that width to truncate again so the affix fits the balanced final line, then
+                // keep that width fixed while shaping the result.
+                if text != original_text
+                    && !truncation_affix.is_empty()
+                    && text_style.text_wrap == TextWrap::Balance
+                    && let (Some(max_lines), Some(wrap_width), Some(_)) =
+                        (text_style.line_clamp, wrap_width, balance_range)
+                    && let Some(ellipsis_group_ix) = match truncate_from {
+                        TruncateFrom::End => lines.iter().rposition(|line| {
+                            line.text.ends_with(truncation_affix.as_ref())
+                        }),
+                        TruncateFrom::Start => lines.iter().position(|line| {
+                            line.text.starts_with(truncation_affix.as_ref())
+                        }),
+                        TruncateFrom::Middle => None,
+                    }
+                    && let Some(balanced_width) = lines[ellipsis_group_ix].layout.wrap_width
+                {
+                    let (balanced_text, balanced_runs) = if truncate_from == TruncateFrom::End {
+                        // Keep already-balanced forced-break groups intact. Only the group that
+                        // contains the ellipsis is being truncated again; applying its width to
+                        // the entire string can make an earlier, wider group consume extra clamp
+                        // lines and move the ellipsis backwards.
+                        let group_start = original_text
+                            .match_indices('\n')
+                            .nth(ellipsis_group_ix.saturating_sub(1))
+                            .filter(|_| ellipsis_group_ix > 0)
+                            .map_or(0, |(ix, _)| ix + 1);
+                        let lines_before_group = lines[..ellipsis_group_ix]
+                            .iter()
+                            .map(|line| line.layout.wrap_boundaries().len() + 1)
+                            .sum::<usize>();
+                        let remaining_lines = max_lines.saturating_sub(lines_before_group).max(1);
+                        let slice_runs = |range: Range<usize>| {
+                            let mut run_start = 0;
+                            original_runs
+                                .iter()
+                                .filter_map(|run| {
+                                    let run_end = run_start + run.len;
+                                    let selected_start = run_start.max(range.start);
+                                    let selected_end = run_end.min(range.end);
+                                    run_start = run_end;
+                                    (selected_start < selected_end).then(|| {
+                                        let mut run = run.clone();
+                                        run.len = selected_end - selected_start;
+                                        run
+                                    })
+                                })
+                                .collect::<Vec<_>>()
+                        };
+                        let prefix_runs = slice_runs(0..group_start);
+                        let group_runs = slice_runs(group_start..original_text.len());
+                        let (group_text, group_runs) = line_wrapper.truncate_wrapped_line(
+                            original_text[group_start..].into(),
+                            balanced_width,
+                            remaining_lines,
+                            &truncation_affix,
+                            &group_runs,
+                            truncate_from,
+                        );
+                        let balanced_text = SharedString::from(format!(
+                            "{}{}",
+                            &original_text[..group_start],
+                            group_text
+                        ));
+                        let mut balanced_runs = prefix_runs;
+                        balanced_runs.extend(group_runs.iter().cloned());
+                        (balanced_text, Cow::Owned(balanced_runs))
+                    } else {
+                        line_wrapper.truncate_wrapped_line(
+                            original_text.clone(),
+                            balanced_width,
+                            max_lines,
+                            &truncation_affix,
+                            &original_runs,
+                            truncate_from,
+                        )
+                    };
+                    if balanced_text != text {
+                        let balance_range = match truncate_from {
+                            TruncateFrom::End
+                                if balanced_text.ends_with(truncation_affix.as_ref()) =>
+                            {
+                                Some(0..balanced_text.len() - truncation_affix.len())
+                            }
+                            TruncateFrom::Start
+                                if balanced_text.starts_with(truncation_affix.as_ref()) =>
+                            {
+                                Some(truncation_affix.len()..balanced_text.len())
+                            }
+                            _ => None,
+                        };
+                        if let Some(balanced_lines) = window
+                            .text_system()
+                            .shape_text_with_balance(
+                                balanced_text.clone(),
+                                font_size,
+                                &balanced_runs,
+                                Some(wrap_width),
+                                Some(max_lines),
+                                true,
+                                balance_range,
+                                Some(balanced_width),
+                            )
+                            .log_err()
+                        {
+                            len = balanced_text.len();
+                            lines = balanced_lines;
+                        }
+                    }
+                }
 
                 let mut size: Size<Pixels> = Size::default();
                 for line in &lines {
@@ -829,6 +966,8 @@ impl TextLayout {
                     len,
                     line_height,
                     wrap_width,
+                    text_wrap: text_style.text_wrap,
+                    line_clamp: text_style.line_clamp,
                     truncate_width,
                     size: Some(size),
                     bounds: None,

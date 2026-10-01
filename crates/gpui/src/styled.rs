@@ -3,8 +3,8 @@ use crate::{
     DefiniteLength, Display, Fill, FlexDirection, FlexWrap, Font, FontFeatures, FontStyle,
     FontWeight, GridPlacement, GridTemplate, GridTemplateComponent, GridTrack, GridTrackMax,
     GridTrackMin, Hsla, JustifyContent, Length, Pixels, SharedString, StrikethroughStyle,
-    StyleRefinement, TextAlign, TextOverflow, TextStyleRefinement, UnderlineStyle, WhiteSpace, px,
-    relative, rems,
+    StyleRefinement, TextAlign, TextOverflow, TextStyleRefinement, TextWrap, UnderlineStyle,
+    WhiteSpace, px, relative, rems,
 };
 pub use gpui_macros::{
     border_style_methods, box_shadow_style_methods, cursor_style_methods, margin_style_methods,
@@ -116,6 +116,12 @@ pub trait Styled: Sized {
     /// [Docs](https://developer.mozilla.org/en-US/docs/Web/CSS/white-space)
     fn whitespace_pre(mut self) -> Self {
         self.text_style().white_space = Some(WhiteSpace::Pre);
+        self
+    }
+
+    /// Balances wrapped text that fits within six lines.
+    fn text_wrap_balance(mut self) -> Self {
+        self.text_style().text_wrap = Some(TextWrap::Balance);
         self
     }
 

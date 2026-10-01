@@ -14,6 +14,9 @@ use std::{
 
 use super::LineWrapper;
 
+const MAX_BALANCED_LINES: usize = 6;
+const BALANCE_SEARCH_STEPS: usize = 16;
+
 /// A laid out and styled line of text
 #[derive(Default, Debug)]
 pub struct LineLayout {
@@ -691,6 +694,73 @@ impl LineLayoutCache {
 
             layout
         }
+    }
+
+    /// Find the narrowest wrap width that preserves the greedy line count for a short block.
+    /// When clamped, only the text in the visible greedy lines participates in the search.
+    pub(crate) fn balanced_wrap_width(
+        &self,
+        text: &str,
+        font_size: Pixels,
+        runs: &[FontRun],
+        wrap_width: Pixels,
+        line_clamp: Option<usize>,
+    ) -> Option<Pixels> {
+        let layout = self.layout_line(text, font_size, runs, None);
+        let greedy_boundaries = layout.compute_wrap_boundaries(text, wrap_width, None);
+        let greedy_line_count = greedy_boundaries.len() + 1;
+        let visible_line_count = greedy_line_count.min(line_clamp.unwrap_or(usize::MAX));
+
+        if !(2..=MAX_BALANCED_LINES).contains(&visible_line_count) {
+            return None;
+        }
+
+        let balanced_text_len = if visible_line_count < greedy_line_count {
+            let boundary = greedy_boundaries[visible_line_count - 1];
+            layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index
+        } else {
+            text.len()
+        };
+        let balanced_text = &text[..balanced_text_len];
+        let mut balanced_runs = SmallVec::<[FontRun; 1]>::new();
+        let mut remaining = balanced_text_len;
+        for run in runs {
+            if remaining == 0 {
+                break;
+            }
+            let mut run = *run;
+            run.len = run.len.min(remaining);
+            remaining -= run.len;
+            balanced_runs.push(run);
+        }
+
+        let balanced_layout = if balanced_text_len == text.len() {
+            layout
+        } else {
+            self.layout_line(balanced_text, font_size, &balanced_runs, None)
+        };
+        let line_count = |width| {
+            balanced_layout
+                .compute_wrap_boundaries(balanced_text, width, None)
+                .len()
+                + 1
+        };
+
+        let mut lower = Pixels::ZERO;
+        let mut upper = wrap_width;
+        for _ in 0..BALANCE_SEARCH_STEPS {
+            let midpoint = (lower + upper) / 2.0;
+            if midpoint == lower || midpoint == upper {
+                break;
+            }
+            if line_count(midpoint) <= visible_line_count {
+                upper = midpoint;
+            } else {
+                lower = midpoint;
+            }
+        }
+
+        Some(upper)
     }
 
     pub fn layout_line<Text>(
