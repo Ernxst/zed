@@ -1,5 +1,4 @@
 use std::{
-    backtrace::Backtrace,
     cell::{Cell, RefCell},
     ffi::{OsStr, OsString, c_void},
     os::windows::ffi::{OsStrExt as _, OsStringExt as _},
@@ -1225,29 +1224,10 @@ impl WindowsPlatformInner {
                     // then quit out of foreground work to allow us to process other gpui events first before returning back to foreground task work
                     // if we don't we might not for example process window quit events
                     let mut msg = MSG::default();
-                    let process_message = |msg: &_, from_paint_queue: bool| {
+                    let process_message = |msg: &_| {
                         if translate_accelerator(msg).is_none() {
                             _ = unsafe { TranslateMessage(msg) };
-                            let trace_paint = from_paint_queue
-                                && msg.message == WM_PAINT
-                                && std::env::var_os("GPU_IX_TRACE_APP_BORROW").is_some();
-                            if trace_paint {
-                                eprintln!(
-                                    "[GPU-IX-WIN32-PUMP] before WM_PAINT dispatch thread={:?} hwnd={:?} active_mutable_borrows={:?} stack:\n{}",
-                                    std::thread::current().id(),
-                                    msg.hwnd,
-                                    gpui::debug_active_mutable_app_borrows(),
-                                    Backtrace::force_capture()
-                                );
-                            }
                             unsafe { DispatchMessageW(msg) };
-                            if trace_paint {
-                                eprintln!(
-                                    "[GPU-IX-WIN32-PUMP] after WM_PAINT dispatch thread={:?} hwnd={:?}",
-                                    std::thread::current().id(),
-                                    msg.hwnd
-                                );
-                            }
                         }
                     };
                     let peek_msg = |msg: &mut _, msg_kind| unsafe {
@@ -1256,10 +1236,10 @@ impl WindowsPlatformInner {
                     // We need to process a paint message here as otherwise we will re-enter `run_foreground_task` before painting if we have work remaining.
                     // The reason for this is that windows prefers custom application message processing over system messages.
                     if peek_msg(&mut msg, PM_QS_PAINT) {
-                        process_message(&msg, true);
+                        process_message(&msg);
                     }
                     while peek_msg(&mut msg, PM_QS_INPUT) {
-                        process_message(&msg, false);
+                        process_message(&msg);
                     }
                     // Allow the main loop to process other gpui events before going back into `run_foreground_task`
                     unsafe {

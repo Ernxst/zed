@@ -1,13 +1,11 @@
 use scheduler::Instant;
 use std::{
     any::{TypeId, type_name},
-    backtrace::Backtrace,
     cell::{BorrowMutError, Cell, Ref, RefCell, RefMut},
     ffi::OsString,
     marker::PhantomData,
     mem,
     ops::{Deref, DerefMut},
-    panic::Location,
     path::{Path, PathBuf},
     rc::{Rc, Weak},
     sync::{Arc, atomic::Ordering::SeqCst},
@@ -87,111 +85,9 @@ pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(200);
 #[doc(hidden)]
 pub struct AppCell {
     app: RefCell<App>,
-    debug_borrows: RefCell<
-        Vec<(
-            u64,
-            &'static str,
-            &'static Location<'static>,
-            Option<String>,
-        )>,
-    >,
-    next_debug_borrow_id: Cell<u64>,
-}
-
-thread_local! {
-    static DEBUG_MUTABLE_APP_BORROWS: RefCell<Vec<(usize, u64, &'static Location<'static>, String)>> = const { RefCell::new(Vec::new()) };
-}
-
-#[doc(hidden)]
-pub fn debug_active_mutable_app_borrows() -> String {
-    if std::env::var_os("GPU_IX_TRACE_APP_BORROW").is_none() {
-        return String::new();
-    }
-
-    DEBUG_MUTABLE_APP_BORROWS.with(|borrows| {
-        borrows
-            .borrow()
-            .iter()
-            .map(|(cell, id, caller, _)| format!("id={id} cell={cell:#x} owner={caller}"))
-            .collect::<Vec<_>>()
-            .join("; ")
-    })
 }
 
 impl AppCell {
-    #[track_caller]
-    fn begin_debug_borrow(
-        &self,
-        kind: &'static str,
-        owner: &'static Location<'static>,
-    ) -> Option<u64> {
-        if std::env::var_os("GPU_IX_TRACE_APP_BORROW").is_none() {
-            return None;
-        }
-
-        let id = self.next_debug_borrow_id.get();
-        self.next_debug_borrow_id.set(id.wrapping_add(1));
-        let caller = owner;
-        let mut active = self.debug_borrows.borrow_mut();
-        let origin_stack = (kind == "mutable"
-            && !active
-                .iter()
-                .any(|(_, active_kind, _, _)| *active_kind == "mutable"))
-        .then(|| Backtrace::force_capture().to_string());
-        active.push((id, kind, caller, origin_stack));
-        if kind == "mutable" {
-            let cell = self as *const Self as usize;
-            DEBUG_MUTABLE_APP_BORROWS.with(|borrows| {
-                borrows.borrow_mut().push((
-                    cell,
-                    id,
-                    caller,
-                    active.last().unwrap().3.clone().unwrap_or_default(),
-                ));
-            });
-        }
-        Some(id)
-    }
-
-    fn end_debug_borrow(&self, id: u64) {
-        self.debug_borrows
-            .borrow_mut()
-            .retain(|(active_id, _, _, _)| *active_id != id);
-        let cell = self as *const Self as usize;
-        DEBUG_MUTABLE_APP_BORROWS.with(|borrows| {
-            borrows
-                .borrow_mut()
-                .retain(|(active_cell, active_id, _, _)| *active_cell != cell || *active_id != id);
-        });
-    }
-
-    fn trace_failed_borrow(&self, operation: &'static str) {
-        if std::env::var_os("GPU_IX_TRACE_APP_BORROW").is_none() {
-            return;
-        }
-
-        let thread = std::thread::current().id();
-        let active = self.debug_borrows.borrow();
-        eprintln!(
-            "[GPU-IX-APP-BORROW] failed operation={operation} thread={thread:?} active_count={}",
-            active.len()
-        );
-        for (id, kind, caller, origin_stack) in active.iter() {
-            eprintln!(
-                "[GPU-IX-APP-BORROW] active id={id} kind={kind} thread={thread:?} began_at={caller}"
-            );
-            if let Some(origin_stack) = origin_stack {
-                eprintln!(
-                    "[GPU-IX-APP-BORROW] active origin stack id={id} thread={thread:?}\n{origin_stack}"
-                );
-            }
-        }
-        eprintln!(
-            "[GPU-IX-APP-BORROW] failure stack operation={operation} thread={thread:?}\n{}",
-            Backtrace::force_capture()
-        );
-    }
-
     #[doc(hidden)]
     #[track_caller]
     pub fn borrow(&self) -> AppRef<'_> {
@@ -199,15 +95,7 @@ impl AppCell {
             let thread_id = std::thread::current().id();
             eprintln!("borrowed {thread_id:?}");
         }
-        if std::env::var_os("GPU_IX_TRACE_APP_BORROW").is_some() && self.app.try_borrow().is_err() {
-            self.trace_failed_borrow("borrow");
-        }
-        let app = self.app.borrow();
-        let trace_id = self.begin_debug_borrow("shared", Location::caller());
-        AppRef {
-            app,
-            trace_id: trace_id.map(|id| (self, id)),
-        }
+        AppRef(self.app.borrow())
     }
 
     #[doc(hidden)]
@@ -217,17 +105,7 @@ impl AppCell {
             let thread_id = std::thread::current().id();
             eprintln!("borrowed {thread_id:?}");
         }
-        if std::env::var_os("GPU_IX_TRACE_APP_BORROW").is_some()
-            && self.app.try_borrow_mut().is_err()
-        {
-            self.trace_failed_borrow("borrow_mut");
-        }
-        let app = self.app.borrow_mut();
-        let trace_id = self.begin_debug_borrow("mutable", Location::caller());
-        AppRefMut {
-            app,
-            trace_id: trace_id.map(|id| (self, id)),
-        }
+        AppRefMut(self.app.borrow_mut())
     }
 
     #[doc(hidden)]
@@ -237,56 +115,16 @@ impl AppCell {
             let thread_id = std::thread::current().id();
             eprintln!("borrowed {thread_id:?}");
         }
-        match self.app.try_borrow_mut() {
-            Ok(app) => {
-                let trace_id = self.begin_debug_borrow("mutable", Location::caller());
-                Ok(AppRefMut {
-                    app,
-                    trace_id: trace_id.map(|id| (self, id)),
-                })
-            }
-            Err(error) => {
-                self.trace_failed_borrow("try_borrow_mut");
-                Err(error)
-            }
-        }
-    }
-
-    #[doc(hidden)]
-    pub fn try_borrow_mut_for_window_update(
-        &self,
-        owner: &'static Location<'static>,
-    ) -> Result<AppRefMut<'_>, BorrowMutError> {
-        match self.app.try_borrow_mut() {
-            Ok(app) => {
-                let trace_id = self.begin_debug_borrow("mutable", owner);
-                Ok(AppRefMut {
-                    app,
-                    trace_id: trace_id.map(|id| (self, id)),
-                })
-            }
-            Err(error) => {
-                self.trace_failed_borrow("try_borrow_mut");
-                Err(error)
-            }
-        }
+        Ok(AppRefMut(self.app.try_borrow_mut()?))
     }
 }
 
 #[doc(hidden)]
 #[derive(Deref, DerefMut)]
-pub struct AppRef<'a> {
-    #[deref]
-    app: Ref<'a, App>,
-    #[deref_mut(ignore)]
-    trace_id: Option<(&'a AppCell, u64)>,
-}
+pub struct AppRef<'a>(Ref<'a, App>);
 
 impl Drop for AppRef<'_> {
     fn drop(&mut self) {
-        if let Some((cell, id)) = self.trace_id.take() {
-            cell.end_debug_borrow(id);
-        }
         if option_env!("TRACK_THREAD_BORROWS").is_some() {
             let thread_id = std::thread::current().id();
             eprintln!("dropped borrow from {thread_id:?}");
@@ -296,18 +134,10 @@ impl Drop for AppRef<'_> {
 
 #[doc(hidden)]
 #[derive(Deref, DerefMut)]
-pub struct AppRefMut<'a> {
-    #[deref]
-    #[deref_mut]
-    app: RefMut<'a, App>,
-    trace_id: Option<(&'a AppCell, u64)>,
-}
+pub struct AppRefMut<'a>(RefMut<'a, App>);
 
 impl Drop for AppRefMut<'_> {
     fn drop(&mut self) {
-        if let Some((cell, id)) = self.trace_id.take() {
-            cell.end_debug_borrow(id);
-        }
         if option_env!("TRACK_THREAD_BORROWS").is_some() {
             let thread_id = std::thread::current().id();
             eprintln!("dropped {thread_id:?}");
@@ -1114,8 +944,6 @@ impl App {
                 #[cfg(any(test, feature = "leak-detection"))]
                 _ref_counts,
             }),
-            debug_borrows: RefCell::new(Vec::new()),
-            next_debug_borrow_id: Cell::new(0),
         });
 
         init_app_menus(platform.as_ref(), &app.borrow());
