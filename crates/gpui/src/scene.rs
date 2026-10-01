@@ -1917,6 +1917,89 @@ mod tests {
     }
 
     #[test]
+    fn positioned_child_paints_over_its_ancestor_border() {
+        let mut scene = Scene::default();
+        let clip_id = scene.insert_clip(ClipNode {
+            folded_bounds: bounds(0., 0., 100., 100.),
+            rounded_bounds: Default::default(),
+            corner_radii: Default::default(),
+            rounded_head: ClipNode::NONE,
+            parent_rounded: ClipNode::NONE,
+        });
+        let glyph = |tile_id| MonochromeSprite {
+            order: 0,
+            clip_id,
+            bounds: bounds(0., 0., 10., 18.),
+            color: Default::default(),
+            tile: AtlasTile {
+                texture_id: AtlasTextureId {
+                    index: 0,
+                    kind: crate::AtlasTextureKind::Monochrome,
+                },
+                tile_id: crate::TileId(tile_id),
+                padding: 0,
+                bounds: Default::default(),
+            },
+            transformation: TransformationMatrix::unit(),
+        };
+
+        scene.push_stacking_element(vec![0], 2, 0, false);
+        scene.set_paint_phase(0);
+        scene.insert_primitive(glyph(1)); // Ancestor border, painted with decoration.
+        scene.push_stacking_element(vec![0, 0], 2, 0, false);
+        scene.set_paint_phase(0);
+        scene.insert_primitive(glyph(2)); // Positioned child overlaps the border.
+        scene.pop_stacking_order();
+        scene.pop_stacking_order();
+        scene.finish();
+
+        let painted: Vec<u32> = scene
+            .monochrome_sprites
+            .iter()
+            .map(|sprite| sprite.tile.tile_id.0)
+            .collect();
+        assert_eq!(painted, [1, 2]);
+    }
+
+    #[test]
+    fn rounded_overflow_parent_paints_decoration_before_its_filling_child() {
+        let mut scene = Scene::default();
+        let clip_id = scene.insert_clip(ClipNode {
+            folded_bounds: bounds(0., 0., 100., 100.),
+            rounded_bounds: bounds(0., 0., 100., 100.),
+            corner_radii: Corners::all(ScaledPixels(24.)),
+            rounded_head: 0,
+            parent_rounded: ClipNode::NONE,
+        });
+        let full_bounds_quad = |clip_id, color| Quad {
+            order: 0,
+            clip_id,
+            bounds: bounds(0., 0., 100., 100.),
+            background: color.into(),
+            corner_radii: Corners::all(ScaledPixels(24.)),
+            border_widths: Edges::default(),
+            border_color: Default::default(),
+            border_style: BorderStyle::default(),
+        };
+
+        scene.push_stacking_element(vec![0], 1, 0, false);
+        scene.set_paint_phase(0);
+        scene.insert_primitive(full_bounds_quad(clip_id, Hsla::red()));
+        scene.push_stacking_element(vec![0, 0], 1, 0, false);
+        scene.set_paint_phase(1);
+        scene.insert_primitive(full_bounds_quad(clip_id, Hsla::blue()));
+        scene.pop_stacking_order();
+        scene.pop_stacking_order();
+        scene.finish();
+
+        assert_eq!(scene.quads.len(), 2);
+        assert_eq!(scene.quads[0].background, Hsla::red().into());
+        assert_eq!(scene.quads[1].background, Hsla::blue().into());
+        assert_eq!(scene.quads[0].clip_id, clip_id);
+        assert_eq!(scene.quads[1].clip_id, clip_id);
+    }
+
+    #[test]
     fn ancestor_outline_paints_over_a_positioned_descendant() {
         let mut scene = Scene::default();
         let clip_id = scene.insert_clip(ClipNode {

@@ -999,11 +999,6 @@ impl Style {
 
         window.paint_inset_shadows(shadow_padding_area, padding_corner_radii, &self.box_shadow);
 
-        window.set_stacking_paint_phase(1);
-        continuation(window, cx);
-
-        window.set_stacking_paint_phase(2);
-
         if self.is_border_visible() {
             let mut background = self.border_color.unwrap_or_default();
             background.a = 0.;
@@ -1017,6 +1012,10 @@ impl Style {
             ));
         }
 
+        window.set_stacking_paint_phase(1);
+        continuation(window, cx);
+
+        window.set_stacking_paint_phase(2);
         if self.is_outline_visible() {
             let outline_width = self.outline_width.to_pixels(rem_size);
             let outline_offset = self.outline_offset.to_pixels(rem_size);
