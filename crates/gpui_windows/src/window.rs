@@ -1523,6 +1523,18 @@ unsafe extern "system" fn window_procedure(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if std::env::var_os("GPU_IX_TRACE_APP_BORROW").is_some()
+        && matches!(
+            msg,
+            WM_PAINT | WM_SIZE | WM_MOVE | WM_WINDOWPOSCHANGED | WM_DPICHANGED
+        )
+    {
+        eprintln!(
+            "[GPU-IX-WIN32-WNDPROC] enter msg={msg:#x} hwnd={hwnd:?} thread={:?} stack:\n{}",
+            std::thread::current().id(),
+            std::backtrace::Backtrace::force_capture()
+        );
+    }
     if msg == WM_NCCREATE {
         let window_params = unsafe { &*(lparam.0 as *const CREATESTRUCTW) };
         let window_creation_context = window_params.lpCreateParams as *mut WindowCreateContext;

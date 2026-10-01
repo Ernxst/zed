@@ -87,7 +87,14 @@ pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(200);
 #[doc(hidden)]
 pub struct AppCell {
     app: RefCell<App>,
-    debug_borrows: RefCell<Vec<(u64, &'static str, &'static Location<'static>)>>,
+    debug_borrows: RefCell<
+        Vec<(
+            u64,
+            &'static str,
+            &'static Location<'static>,
+            Option<String>,
+        )>,
+    >,
     next_debug_borrow_id: Cell<u64>,
 }
 
@@ -101,14 +108,20 @@ impl AppCell {
         let id = self.next_debug_borrow_id.get();
         self.next_debug_borrow_id.set(id.wrapping_add(1));
         let caller = Location::caller();
-        self.debug_borrows.borrow_mut().push((id, kind, caller));
+        let mut active = self.debug_borrows.borrow_mut();
+        let origin_stack = (kind == "mutable"
+            && !active
+                .iter()
+                .any(|(_, active_kind, _, _)| *active_kind == "mutable"))
+        .then(|| Backtrace::force_capture().to_string());
+        active.push((id, kind, caller, origin_stack));
         Some(id)
     }
 
     fn end_debug_borrow(&self, id: u64) {
         self.debug_borrows
             .borrow_mut()
-            .retain(|(active_id, _, _)| *active_id != id);
+            .retain(|(active_id, _, _, _)| *active_id != id);
     }
 
     fn trace_failed_borrow(&self, operation: &'static str) {
@@ -122,10 +135,15 @@ impl AppCell {
             "[GPU-IX-APP-BORROW] failed operation={operation} thread={thread:?} active_count={}",
             active.len()
         );
-        for (id, kind, caller) in active.iter() {
+        for (id, kind, caller, origin_stack) in active.iter() {
             eprintln!(
                 "[GPU-IX-APP-BORROW] active id={id} kind={kind} thread={thread:?} began_at={caller}"
             );
+            if let Some(origin_stack) = origin_stack {
+                eprintln!(
+                    "[GPU-IX-APP-BORROW] active origin stack id={id} thread={thread:?}\n{origin_stack}"
+                );
+            }
         }
         eprintln!(
             "[GPU-IX-APP-BORROW] failure stack operation={operation} thread={thread:?}\n{}",
