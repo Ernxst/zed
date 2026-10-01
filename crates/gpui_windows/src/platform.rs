@@ -1233,9 +1233,10 @@ impl WindowsPlatformInner {
                                 && std::env::var_os("GPU_IX_TRACE_APP_BORROW").is_some();
                             if trace_paint {
                                 eprintln!(
-                                    "[GPU-IX-WIN32-PUMP] before WM_PAINT dispatch thread={:?} hwnd={:?} stack:\n{}",
+                                    "[GPU-IX-WIN32-PUMP] before WM_PAINT dispatch thread={:?} hwnd={:?} active_mutable_borrows={:?} stack:\n{}",
                                     std::thread::current().id(),
                                     msg.hwnd,
+                                    gpui::debug_active_mutable_app_borrows(),
                                     Backtrace::force_capture()
                                 );
                             }

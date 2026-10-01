@@ -98,16 +98,40 @@ pub struct AppCell {
     next_debug_borrow_id: Cell<u64>,
 }
 
+thread_local! {
+    static DEBUG_MUTABLE_APP_BORROWS: RefCell<Vec<(usize, u64, &'static Location<'static>, String)>> = const { RefCell::new(Vec::new()) };
+}
+
+#[doc(hidden)]
+pub fn debug_active_mutable_app_borrows() -> String {
+    if std::env::var_os("GPU_IX_TRACE_APP_BORROW").is_none() {
+        return String::new();
+    }
+
+    DEBUG_MUTABLE_APP_BORROWS.with(|borrows| {
+        borrows
+            .borrow()
+            .iter()
+            .map(|(cell, id, caller, _)| format!("id={id} cell={cell:#x} owner={caller}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    })
+}
+
 impl AppCell {
     #[track_caller]
-    fn begin_debug_borrow(&self, kind: &'static str) -> Option<u64> {
+    fn begin_debug_borrow(
+        &self,
+        kind: &'static str,
+        owner: &'static Location<'static>,
+    ) -> Option<u64> {
         if std::env::var_os("GPU_IX_TRACE_APP_BORROW").is_none() {
             return None;
         }
 
         let id = self.next_debug_borrow_id.get();
         self.next_debug_borrow_id.set(id.wrapping_add(1));
-        let caller = Location::caller();
+        let caller = owner;
         let mut active = self.debug_borrows.borrow_mut();
         let origin_stack = (kind == "mutable"
             && !active
@@ -115,6 +139,17 @@ impl AppCell {
                 .any(|(_, active_kind, _, _)| *active_kind == "mutable"))
         .then(|| Backtrace::force_capture().to_string());
         active.push((id, kind, caller, origin_stack));
+        if kind == "mutable" {
+            let cell = self as *const Self as usize;
+            DEBUG_MUTABLE_APP_BORROWS.with(|borrows| {
+                borrows.borrow_mut().push((
+                    cell,
+                    id,
+                    caller,
+                    active.last().unwrap().3.clone().unwrap_or_default(),
+                ));
+            });
+        }
         Some(id)
     }
 
@@ -122,6 +157,12 @@ impl AppCell {
         self.debug_borrows
             .borrow_mut()
             .retain(|(active_id, _, _, _)| *active_id != id);
+        let cell = self as *const Self as usize;
+        DEBUG_MUTABLE_APP_BORROWS.with(|borrows| {
+            borrows
+                .borrow_mut()
+                .retain(|(active_cell, active_id, _, _)| *active_cell != cell || *active_id != id);
+        });
     }
 
     fn trace_failed_borrow(&self, operation: &'static str) {
@@ -162,7 +203,7 @@ impl AppCell {
             self.trace_failed_borrow("borrow");
         }
         let app = self.app.borrow();
-        let trace_id = self.begin_debug_borrow("shared");
+        let trace_id = self.begin_debug_borrow("shared", Location::caller());
         AppRef {
             app,
             trace_id: trace_id.map(|id| (self, id)),
@@ -182,7 +223,7 @@ impl AppCell {
             self.trace_failed_borrow("borrow_mut");
         }
         let app = self.app.borrow_mut();
-        let trace_id = self.begin_debug_borrow("mutable");
+        let trace_id = self.begin_debug_borrow("mutable", Location::caller());
         AppRefMut {
             app,
             trace_id: trace_id.map(|id| (self, id)),
@@ -198,7 +239,27 @@ impl AppCell {
         }
         match self.app.try_borrow_mut() {
             Ok(app) => {
-                let trace_id = self.begin_debug_borrow("mutable");
+                let trace_id = self.begin_debug_borrow("mutable", Location::caller());
+                Ok(AppRefMut {
+                    app,
+                    trace_id: trace_id.map(|id| (self, id)),
+                })
+            }
+            Err(error) => {
+                self.trace_failed_borrow("try_borrow_mut");
+                Err(error)
+            }
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn try_borrow_mut_for_window_update(
+        &self,
+        owner: &'static Location<'static>,
+    ) -> Result<AppRefMut<'_>, BorrowMutError> {
+        match self.app.try_borrow_mut() {
+            Ok(app) => {
+                let trace_id = self.begin_debug_borrow("mutable", owner);
                 Ok(AppRefMut {
                     app,
                     trace_id: trace_id.map(|id| (self, id)),

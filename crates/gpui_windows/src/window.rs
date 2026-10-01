@@ -1530,8 +1530,9 @@ unsafe extern "system" fn window_procedure(
         )
     {
         eprintln!(
-            "[GPU-IX-WIN32-WNDPROC] enter msg={msg:#x} hwnd={hwnd:?} thread={:?} stack:\n{}",
+            "[GPU-IX-WIN32-WNDPROC] enter msg={msg:#x} hwnd={hwnd:?} thread={:?} active_mutable_borrows={:?} stack:\n{}",
             std::thread::current().id(),
+            gpui::debug_active_mutable_app_borrows(),
             std::backtrace::Backtrace::force_capture()
         );
     }

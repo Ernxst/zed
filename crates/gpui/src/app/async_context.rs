@@ -85,12 +85,13 @@ impl AppContext for AsyncApp {
     }
 
     #[inline(always)]
+    #[track_caller]
     fn update_window<T, F>(&mut self, window: AnyWindowHandle, f: F) -> Result<T>
     where
         F: FnOnce(AnyView, &mut Window, &mut App) -> T,
     {
         let app = self.app.upgrade().context("app was released")?;
-        let mut lock = app.try_borrow_mut()?;
+        let mut lock = app.try_borrow_mut_for_window_update(std::panic::Location::caller())?;
         if lock.quitting {
             bail!("app is quitting");
         }
