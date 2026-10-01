@@ -1971,9 +1971,10 @@ mod tests {
             rounded_head: 0,
             parent_rounded: ClipNode::NONE,
         });
-        let full_bounds_quad = |clip_id, color| Quad {
+        let full_bounds_quad = |clip_id: u32, color: Hsla| Quad {
             order: 0,
             clip_id,
+            pad: 0,
             bounds: bounds(0., 0., 100., 100.),
             background: color.into(),
             corner_radii: Corners::all(ScaledPixels(24.)),
