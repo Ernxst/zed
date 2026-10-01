@@ -2,7 +2,7 @@ use crate::{
     ActiveTooltip, AnyView, App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId,
     HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, TextOverflow,
-    TextRun, TextStyle, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
+    TextRun, TextStyle, TextWrap, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
     WrappedLineLayout, px, register_tooltip_mouse_handlers, set_tooltip_on_window,
 };
 use anyhow::Context as _;
@@ -661,6 +661,8 @@ struct TextLayoutInner {
     lines: SmallVec<[WrappedLine; 1]>,
     line_height: Pixels,
     wrap_width: Option<Pixels>,
+    text_wrap: TextWrap,
+    line_clamp: Option<usize>,
     truncate_width: Option<Pixels>,
     size: Option<Size<Pixels>>,
     bounds: Option<Bounds<Pixels>>,
@@ -745,6 +747,8 @@ impl TextLayout {
                 if let Some(text_layout) = element_state.0.borrow().as_ref()
                     && let Some(size) = text_layout.size
                     && wrap_width == text_layout.wrap_width
+                    && text_style.text_wrap == text_layout.text_wrap
+                    && text_style.line_clamp == text_layout.line_clamp
                     && truncate_width.is_none()
                     && text_layout.truncate_width.is_none()
                 {
@@ -795,12 +799,13 @@ impl TextLayout {
 
                 let Some(lines) = window
                     .text_system()
-                    .shape_text(
+                    .shape_text_with_balance(
                         text,
                         font_size,
                         &runs,
                         wrap_width,            // Wrap if we know the width.
                         text_style.line_clamp, // Limit the number of lines if line_clamp is set.
+                        text_style.text_wrap == TextWrap::Balance,
                     )
                     .log_err()
                 else {
@@ -809,6 +814,8 @@ impl TextLayout {
                         len: 0,
                         line_height,
                         wrap_width,
+                        text_wrap: text_style.text_wrap,
+                        line_clamp: text_style.line_clamp,
                         truncate_width,
                         size: Some(Size::default()),
                         bounds: None,
@@ -829,6 +836,8 @@ impl TextLayout {
                     len,
                     line_height,
                     wrap_width,
+                    text_wrap: text_style.text_wrap,
+                    line_clamp: text_style.line_clamp,
                     truncate_width,
                     size: Some(size),
                     bounds: None,

@@ -530,6 +530,16 @@ pub enum WhiteSpace {
     Pre,
 }
 
+/// How to choose soft wrap points when text has a definite width.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum TextWrap {
+    /// Wrap greedily at the available width.
+    #[default]
+    Normal,
+    /// Narrow the wrap width to balance short paragraphs.
+    Balance,
+}
+
 /// How to truncate text that overflows the width of the element
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum TextOverflow {
@@ -603,6 +613,9 @@ pub struct TextStyle {
     /// How to handle whitespace in the text
     pub white_space: WhiteSpace,
 
+    /// How to choose soft wrap points.
+    pub text_wrap: TextWrap,
+
     /// The text should be truncated if it overflows the width of the element
     pub text_overflow: Option<TextOverflow>,
 
@@ -630,6 +643,7 @@ impl Default for TextStyle {
             underline: None,
             strikethrough: None,
             white_space: WhiteSpace::Normal,
+            text_wrap: TextWrap::Normal,
             text_overflow: None,
             text_align: TextAlign::default(),
             line_clamp: None,

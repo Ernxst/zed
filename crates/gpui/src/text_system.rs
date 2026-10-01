@@ -756,6 +756,20 @@ impl WindowTextSystem {
         wrap_width: Option<Pixels>,
         line_clamp: Option<usize>,
     ) -> Result<SmallVec<[WrappedLine; 1]>> {
+        self.shape_text_with_balance(text, font_size, runs, wrap_width, line_clamp, false)
+    }
+
+    /// Shape text with optional balanced wrapping. Balancing is applied independently to each
+    /// forced-break group and only when a definite wrap width is available.
+    pub(crate) fn shape_text_with_balance(
+        &self,
+        text: SharedString,
+        font_size: Pixels,
+        runs: &[TextRun],
+        wrap_width: Option<Pixels>,
+        line_clamp: Option<usize>,
+        balance: bool,
+    ) -> Result<SmallVec<[WrappedLine; 1]>> {
         let mut runs = runs.iter().filter(|run| run.len > 0).cloned().peekable();
         let mut font_runs = self.font_runs_pool.lock().pop().unwrap_or_default();
 
@@ -818,12 +832,28 @@ impl WindowTextSystem {
                 run_start += run_len_within_line;
             }
 
+            let remaining_lines = max_wrap_lines.map(|max| max.saturating_sub(wrapped_lines));
+            let line_wrap_width = wrap_width.and_then(|width| {
+                if balance {
+                    self.line_layout_cache
+                        .balanced_wrap_width(
+                            &line_text,
+                            font_size,
+                            &font_runs,
+                            width,
+                            remaining_lines,
+                        )
+                        .or(Some(width))
+                } else {
+                    Some(width)
+                }
+            });
             let layout = self.line_layout_cache.layout_wrapped_line(
                 &line_text,
                 font_size,
                 &font_runs,
-                wrap_width,
-                max_wrap_lines.map(|max| max.saturating_sub(wrapped_lines)),
+                line_wrap_width,
+                remaining_lines,
             );
             wrapped_lines += layout.wrap_boundaries.len();
 

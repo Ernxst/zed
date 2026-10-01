@@ -687,9 +687,12 @@ impl Boundary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Font, FontFeatures, FontStyle, FontWeight, TestAppContext, TestDispatcher, font};
+    use crate::{
+        Font, FontFeatures, FontStyle, FontWeight, TestAppContext, TestDispatcher, TextRun,
+        WindowTextSystem, font,
+    };
     #[cfg(target_os = "macos")]
-    use crate::{TextRun, WindowTextSystem, WrapBoundary};
+    use crate::WrapBoundary;
 
     fn build_wrapper() -> LineWrapper {
         let dispatcher = TestDispatcher::new(0);
@@ -1260,6 +1263,168 @@ mod tests {
                     }
                 ],
             );
+        });
+    }
+
+    #[crate::test]
+    fn test_balanced_wraps_use_shaped_lines(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let text_system = WindowTextSystem::new(cx.text_system().clone());
+            let text = "Balanced headings have useful line breaks";
+            let plain = TextRun {
+                font: font("Helvetica"),
+                ..Default::default()
+            }
+            .with_len(text.len());
+            let greedy = text_system
+                .shape_text(text.into(), px(18.), &[plain.clone()], Some(px(190.)), None)
+                .unwrap();
+            let balanced = text_system
+                .shape_text_with_balance(
+                    text.into(),
+                    px(18.),
+                    &[plain.clone()],
+                    Some(px(190.)),
+                    None,
+                    true,
+                )
+                .unwrap();
+            let line_count = |lines: &[crate::WrappedLine]| {
+                lines
+                    .iter()
+                    .map(|line| line.layout.wrap_boundaries().len() + 1)
+                    .sum::<usize>()
+            };
+            let line_widths = |lines: &[crate::WrappedLine]| {
+                let mut widths = Vec::new();
+                for line in lines {
+                    let layout = &line.layout.unwrapped_layout;
+                    let mut start = 0;
+                    for boundary in line.layout.wrap_boundaries() {
+                        let end = layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index;
+                        widths.push(layout.x_for_index(end) - layout.x_for_index(start));
+                        start = end;
+                    }
+                    widths.push(layout.width - layout.x_for_index(start));
+                }
+                widths
+            };
+            let spread = |widths: &[Pixels]| {
+                widths.iter().copied().fold(Pixels::ZERO, Pixels::max)
+                    - widths.iter().copied().fold(Pixels::MAX, Pixels::min)
+            };
+
+            let one_line = text_system
+                .shape_text(text.into(), px(18.), &[plain.clone()], Some(px(500.)), None)
+                .unwrap();
+            assert_eq!(line_count(&one_line), 1);
+
+            assert!(line_count(&greedy) >= 2);
+            assert_eq!(line_count(&balanced), line_count(&greedy));
+            assert!(spread(&line_widths(&balanced)) < spread(&line_widths(&greedy)));
+
+            let mixed_runs = [
+                plain.clone().with_len(18),
+                TextRun {
+                    font: font("Helvetica").bold(),
+                    ..Default::default()
+                }
+                .with_len(text.len() - 18),
+            ];
+            let mixed_greedy = text_system
+                .shape_text(text.into(), px(18.), &mixed_runs, Some(px(190.)), None)
+                .unwrap();
+            let mixed_balanced = text_system
+                .shape_text_with_balance(
+                    text.into(),
+                    px(18.),
+                    &mixed_runs,
+                    Some(px(190.)),
+                    None,
+                    true,
+                )
+                .unwrap();
+            assert_eq!(line_count(&mixed_balanced), line_count(&mixed_greedy));
+
+            let intrinsic = text_system
+                .shape_text(text.into(), px(18.), &[plain.clone()], None, None)
+                .unwrap();
+            let intrinsic_with_balance = text_system
+                .shape_text_with_balance(text.into(), px(18.), &[plain], None, None, true)
+                .unwrap();
+            assert_eq!(intrinsic.len(), intrinsic_with_balance.len());
+            assert_eq!(
+                intrinsic[0].layout.unwrapped_layout.width,
+                intrinsic_with_balance[0].layout.unwrapped_layout.width
+            );
+
+            let too_long = "one two three four five six seven eight nine ten eleven twelve";
+            let too_long_run = TextRun {
+                font: font("Helvetica"),
+                ..Default::default()
+            }
+            .with_len(too_long.len());
+            let greedy = text_system
+                .shape_text(
+                    too_long.into(),
+                    px(18.),
+                    &[too_long_run.clone()],
+                    Some(px(45.)),
+                    None,
+                )
+                .unwrap();
+            assert!(line_count(&greedy) > 6);
+            let balanced = text_system
+                .shape_text_with_balance(
+                    too_long.into(),
+                    px(18.),
+                    &[too_long_run],
+                    Some(px(45.)),
+                    None,
+                    true,
+                )
+                .unwrap();
+            assert_eq!(
+                balanced[0].layout.wrap_boundaries(),
+                greedy[0].layout.wrap_boundaries()
+            );
+
+            let forced = "aa bbb cccc\nddddd eeee fff";
+            let forced_run = TextRun {
+                font: font("Helvetica"),
+                ..Default::default()
+            }
+            .with_len(forced.len());
+            let forced_lines = text_system
+                .shape_text_with_balance(
+                    forced.into(),
+                    px(16.),
+                    &[forced_run],
+                    Some(px(65.)),
+                    None,
+                    true,
+                )
+                .unwrap();
+            assert_eq!(forced_lines.len(), 2);
+            assert!(
+                forced_lines
+                    .iter()
+                    .all(|line| line.layout.wrap_width.is_some_and(|width| width < px(65.)))
+            );
+
+            let cjk = "日本語の見出しを読みやすく折り返します";
+            let cjk_run = TextRun {
+                font: font("Helvetica"),
+                ..Default::default()
+            }
+            .with_len(cjk.len());
+            let cjk_greedy = text_system
+                .shape_text(cjk.into(), px(18.), &[cjk_run.clone()], Some(px(95.)), None)
+                .unwrap();
+            let cjk_balanced = text_system
+                .shape_text_with_balance(cjk.into(), px(18.), &[cjk_run], Some(px(95.)), None, true)
+                .unwrap();
+            assert_eq!(line_count(&cjk_balanced), line_count(&cjk_greedy));
         });
     }
 
