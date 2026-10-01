@@ -639,7 +639,14 @@ impl Scene {
                     left_id
                         .plane
                         .cmp(&right_id.plane)
-                        .then_with(|| group_stacking[left].cmp(&group_stacking[right]))
+                        .then_with(|| {
+                            compare_stacking_orders(
+                                &group_stacking[left],
+                                &group_stacking[right],
+                                left_id.phase,
+                                right_id.phase,
+                            )
+                        })
                         .then_with(|| left_id.phase.cmp(&right_id.phase))
                 });
                 self.cached_paint_order_groups = sorted_groups
@@ -735,6 +742,60 @@ impl Scene {
             surfaces_iter: self.surfaces.iter().peekable(),
         }
     }
+}
+
+fn compare_stacking_orders(
+    left: &[StackingOrder],
+    right: &[StackingOrder],
+    left_paint_phase: u8,
+    right_paint_phase: u8,
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    for (left_order, right_order) in left.iter().zip(right) {
+        if left_order == right_order {
+            continue;
+        }
+
+        let source_orders_are_nested = left_order
+            .source_order
+            .starts_with(&right_order.source_order)
+            || right_order
+                .source_order
+                .starts_with(&left_order.source_order);
+        let same_slot = left_order.phase == right_order.phase
+            && left_order.z_index == right_order.z_index
+            && source_orders_are_nested;
+        if same_slot {
+            let left_source = left.last().map(|order| &order.source_order);
+            let right_source = right.last().map(|order| &order.source_order);
+            if let (Some(left_source), Some(right_source)) = (left_source, right_source) {
+                let left_is_ancestor =
+                    right_source.starts_with(left_source) && right_source.len() > left_source.len();
+                let right_is_ancestor =
+                    left_source.starts_with(right_source) && left_source.len() > right_source.len();
+                if left_is_ancestor || right_is_ancestor {
+                    // An element's background and content precede its positioned
+                    // descendants, while its outline follows them. Siblings still
+                    // use their retained source order below.
+                    let ancestor_phase = if left_is_ancestor {
+                        left_paint_phase
+                    } else {
+                        right_paint_phase
+                    };
+                    let ancestor_before_descendant = ancestor_phase < 2;
+                    return match (left_is_ancestor, ancestor_before_descendant) {
+                        (true, true) | (false, false) => Ordering::Less,
+                        (true, false) | (false, true) => Ordering::Greater,
+                    };
+                }
+            }
+        }
+
+        return left_order.cmp(right_order);
+    }
+
+    left.len().cmp(&right.len())
 }
 
 fn rebase_source_order(source_order: &[u32], old: &[u32], new: &[u32]) -> Arc<[u32]> {
