@@ -687,12 +687,12 @@ impl Boundary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    use crate::WrapBoundary;
     use crate::{
         Font, FontFeatures, FontStyle, FontWeight, TestAppContext, TestDispatcher, TextRun,
         WindowTextSystem, font,
     };
-    #[cfg(target_os = "macos")]
-    use crate::WrapBoundary;
 
     fn build_wrapper() -> LineWrapper {
         let dispatcher = TestDispatcher::new(0);
@@ -1287,6 +1287,7 @@ mod tests {
                     Some(px(190.)),
                     None,
                     true,
+                    None,
                 )
                 .unwrap();
             let line_count = |lines: &[crate::WrappedLine]| {
@@ -1317,7 +1318,23 @@ mod tests {
             let one_line = text_system
                 .shape_text(text.into(), px(18.), &[plain.clone()], Some(px(500.)), None)
                 .unwrap();
+            let one_line_balanced = text_system
+                .shape_text_with_balance(
+                    text.into(),
+                    px(18.),
+                    &[plain.clone()],
+                    Some(px(500.)),
+                    None,
+                    true,
+                    None,
+                )
+                .unwrap();
             assert_eq!(line_count(&one_line), 1);
+            assert_eq!(line_count(&one_line_balanced), 1);
+            assert_eq!(
+                one_line_balanced[0].layout.wrap_boundaries(),
+                one_line[0].layout.wrap_boundaries()
+            );
 
             assert!(line_count(&greedy) >= 2);
             assert_eq!(line_count(&balanced), line_count(&greedy));
@@ -1342,6 +1359,7 @@ mod tests {
                     Some(px(190.)),
                     None,
                     true,
+                    None,
                 )
                 .unwrap();
             assert_eq!(line_count(&mixed_balanced), line_count(&mixed_greedy));
@@ -1350,7 +1368,7 @@ mod tests {
                 .shape_text(text.into(), px(18.), &[plain.clone()], None, None)
                 .unwrap();
             let intrinsic_with_balance = text_system
-                .shape_text_with_balance(text.into(), px(18.), &[plain], None, None, true)
+                .shape_text_with_balance(text.into(), px(18.), &[plain], None, None, true, None)
                 .unwrap();
             assert_eq!(intrinsic.len(), intrinsic_with_balance.len());
             assert_eq!(
@@ -1382,6 +1400,7 @@ mod tests {
                     Some(px(45.)),
                     None,
                     true,
+                    None,
                 )
                 .unwrap();
             assert_eq!(
@@ -1403,6 +1422,7 @@ mod tests {
                     Some(px(65.)),
                     None,
                     true,
+                    None,
                 )
                 .unwrap();
             assert_eq!(forced_lines.len(), 2);
@@ -1422,9 +1442,57 @@ mod tests {
                 .shape_text(cjk.into(), px(18.), &[cjk_run.clone()], Some(px(95.)), None)
                 .unwrap();
             let cjk_balanced = text_system
-                .shape_text_with_balance(cjk.into(), px(18.), &[cjk_run], Some(px(95.)), None, true)
+                .shape_text_with_balance(cjk.into(), px(18.), &[cjk_run], Some(px(95.)), None, true, None)
                 .unwrap();
             assert_eq!(line_count(&cjk_balanced), line_count(&cjk_greedy));
+
+            let clamped_text =
+                "Balanced headings have useful line breaks in a narrow desktop window. More words follow past the clamp.";
+            let clamped_run = TextRun {
+                font: font("Helvetica"),
+                ..Default::default()
+            }
+            .with_len(clamped_text.len());
+            let mut wrapper = text_system.line_wrapper(&clamped_run, px(18.));
+            let (truncated, _) = wrapper.truncate_wrapped_line(
+                clamped_text.into(),
+                px(150.),
+                2,
+                "…",
+                &[clamped_run.clone()],
+                TruncateFrom::End,
+            );
+            assert!(truncated.ends_with('…'));
+            let visible_prefix_len = truncated.len() - '…'.len_utf8();
+            let visible_prefix = &truncated[..visible_prefix_len];
+            let visible_run = clamped_run.clone().with_len(visible_prefix_len);
+            let balanced_prefix = text_system
+                .shape_text_with_balance(
+                    visible_prefix.into(),
+                    px(18.),
+                    &[visible_run],
+                    Some(px(150.)),
+                    Some(2),
+                    true,
+                    None,
+                )
+                .unwrap();
+            let balanced_with_ellipsis = text_system
+                .shape_text_with_balance(
+                    truncated,
+                    px(18.),
+                    &[clamped_run],
+                    Some(px(150.)),
+                    Some(2),
+                    true,
+                    Some(0..visible_prefix_len),
+                )
+                .unwrap();
+            assert_eq!(
+                balanced_with_ellipsis[0].layout.wrap_width,
+                balanced_prefix[0].layout.wrap_width
+            );
+            assert_eq!(line_count(&balanced_with_ellipsis), 2);
         });
     }
 

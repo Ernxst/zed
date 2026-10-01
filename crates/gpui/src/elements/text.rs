@@ -756,6 +756,7 @@ impl TextLayout {
                 }
 
                 let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
+                let original_text = text.clone();
                 let (text, runs) = if let Some(truncate_width) = truncate_width {
                     if let Some(max_lines) = text_style.line_clamp
                         && let Some(wrap_width) = wrap_width
@@ -795,6 +796,19 @@ impl TextLayout {
                 } else {
                     (text.clone(), Cow::Borrowed(&*runs))
                 };
+                let balance_range = if text != original_text && !truncation_affix.is_empty() {
+                    match truncate_from {
+                        TruncateFrom::End if text.ends_with(&truncation_affix) => {
+                            Some(0..text.len() - truncation_affix.len())
+                        }
+                        TruncateFrom::Start if text.starts_with(&truncation_affix) => {
+                            Some(truncation_affix.len()..text.len())
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
                 let len = text.len();
 
                 let Some(lines) = window
@@ -806,6 +820,7 @@ impl TextLayout {
                         wrap_width,            // Wrap if we know the width.
                         text_style.line_clamp, // Limit the number of lines if line_clamp is set.
                         text_style.text_wrap == TextWrap::Balance,
+                        balance_range,
                     )
                     .log_err()
                 else {

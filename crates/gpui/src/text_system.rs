@@ -756,7 +756,7 @@ impl WindowTextSystem {
         wrap_width: Option<Pixels>,
         line_clamp: Option<usize>,
     ) -> Result<SmallVec<[WrappedLine; 1]>> {
-        self.shape_text_with_balance(text, font_size, runs, wrap_width, line_clamp, false)
+        self.shape_text_with_balance(text, font_size, runs, wrap_width, line_clamp, false, None)
     }
 
     /// Shape text with optional balanced wrapping. Balancing is applied independently to each
@@ -769,6 +769,7 @@ impl WindowTextSystem {
         wrap_width: Option<Pixels>,
         line_clamp: Option<usize>,
         balance: bool,
+        balance_range: Option<Range<usize>>,
     ) -> Result<SmallVec<[WrappedLine; 1]>> {
         let mut runs = runs.iter().filter(|run| run.len > 0).cloned().peekable();
         let mut font_runs = self.font_runs_pool.lock().pop().unwrap_or_default();
@@ -835,11 +836,34 @@ impl WindowTextSystem {
             let remaining_lines = max_wrap_lines.map(|max| max.saturating_sub(wrapped_lines));
             let line_wrap_width = wrap_width.and_then(|width| {
                 if balance {
+                    let balance_start = balance_range.as_ref().map_or(0, |range| {
+                        range.start.saturating_sub(line_start).min(line_text.len())
+                    });
+                    let balance_end = balance_range
+                        .as_ref()
+                        .map_or(line_text.len(), |range| {
+                            range.end.saturating_sub(line_start).min(line_text.len())
+                        })
+                        .max(balance_start);
+                    let balance_text = &line_text[balance_start..balance_end];
+                    let mut balance_runs = SmallVec::<[FontRun; 1]>::new();
+                    let mut run_start = 0;
+                    for run in &font_runs {
+                        let run_end = run_start + run.len;
+                        let selected_start = run_start.max(balance_start);
+                        let selected_end = run_end.min(balance_end);
+                        if selected_start < selected_end {
+                            let mut run = run.clone();
+                            run.len = selected_end - selected_start;
+                            balance_runs.push(run);
+                        }
+                        run_start = run_end;
+                    }
                     self.line_layout_cache
                         .balanced_wrap_width(
-                            &line_text,
+                            balance_text,
                             font_size,
-                            &font_runs,
+                            &balance_runs,
                             width,
                             remaining_lines,
                         )
