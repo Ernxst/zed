@@ -273,6 +273,13 @@ impl LineLayout {
                 continue;
             }
 
+            // A collapsible space at the end of a line hangs outside the line box. It
+            // must not trigger overflow; if another word follows, its start is the
+            // candidate boundary considered below.
+            if ch == ' ' {
+                continue;
+            }
+
             if is_candidate {
                 last_candidate = Some((boundary, x));
             }
@@ -1254,6 +1261,42 @@ mod tests {
             .iter()
             .map(|g| f32::from(g.position.x))
             .collect()
+    }
+
+    fn wrapped_text_lines(
+        text: &str,
+        layout: &LineLayout,
+        boundaries: &[WrapBoundary],
+    ) -> Vec<String> {
+        let mut lines = Vec::with_capacity(boundaries.len() + 1);
+        let mut start = 0;
+        for boundary in boundaries {
+            let end = layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index;
+            lines.push(text[start..end].to_string());
+            start = end;
+        }
+        lines.push(text[start..].to_string());
+        lines
+    }
+
+    #[test]
+    fn test_trailing_space_does_not_trigger_wrap_before_next_word() {
+        let text = "aa bb";
+        let mut layout = make_layout(
+            (0..text.len())
+                .map(|index| glyph_at(index as f32 * 8., index))
+                .collect(),
+        );
+        layout.width = px(40.);
+
+        let boundaries = layout.compute_wrap_boundaries(text, px(16.), None);
+
+        assert_eq!(boundaries.len(), 1);
+        assert_eq!(layout.runs[0].glyphs[boundaries[0].glyph_ix].index, 3);
+        assert_eq!(
+            wrapped_text_lines(text, &layout, &boundaries),
+            ["aa ", "bb"]
+        );
     }
 
     #[test]
