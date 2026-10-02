@@ -3,7 +3,7 @@ use smallvec::SmallVec;
 use crate::{
     Anchor, AnyElement, App, Axis, Bounds, Display, Edges, Element, GlobalElementId,
     InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels, Point, Position, Size, Style,
-    Window, point, px,
+    Window, point, px, size,
 };
 
 /// The state that the anchored element element uses to track its children.
@@ -73,6 +73,13 @@ impl Anchored {
     /// Snap to window edge and leave some margins.
     pub fn snap_to_window_with_margin(mut self, edges: impl Into<Edges<Pixels>>) -> Self {
         self.fit_mode = AnchoredFitMode::SnapToWindowWithMargin(edges.into());
+        self
+    }
+
+    /// Switch anchor corners when the element would cross the padded window
+    /// boundary, then keep any remaining overflow inside that boundary.
+    pub fn switch_anchor_with_margin(mut self, edges: impl Into<Edges<Pixels>>) -> Self {
+        self.fit_mode = AnchoredFitMode::SwitchAnchorWithMargin(edges.into());
         self
     }
 }
@@ -152,56 +159,77 @@ impl Element for Anchored {
             size: window.viewport_size(),
         };
 
-        if self.fit_mode == AnchoredFitMode::SwitchAnchor {
+        let client_inset = window.client_inset.unwrap_or(px(0.));
+        let switch_limits = match self.fit_mode {
+            AnchoredFitMode::SwitchAnchorWithMargin(edges) => {
+                let edges = edges.map(|edge| *edge + client_inset);
+                Bounds {
+                    origin: point(edges.left, edges.top),
+                    size: window.viewport_size()
+                        - size(edges.left + edges.right, edges.top + edges.bottom),
+                }
+            }
+            _ => limits,
+        };
+
+        if matches!(
+            self.fit_mode,
+            AnchoredFitMode::SwitchAnchor | AnchoredFitMode::SwitchAnchorWithMargin(_)
+        ) {
             let mut anchor = self.anchor;
 
-            if desired.left() < limits.left() || desired.right() > limits.right() {
+            if desired.left() < switch_limits.left() || desired.right() > switch_limits.right() {
                 let switched = Bounds::from_anchor_and_size(
                     anchor.other_side_along(Axis::Horizontal),
                     origin,
                     children_bounds.size,
                 );
-                if !(switched.left() < limits.left() || switched.right() > limits.right()) {
+                if !(switched.left() < switch_limits.left()
+                    || switched.right() > switch_limits.right())
+                {
                     anchor = anchor.other_side_along(Axis::Horizontal);
                     desired = switched
                 }
             }
 
-            if desired.top() < limits.top() || desired.bottom() > limits.bottom() {
+            if desired.top() < switch_limits.top() || desired.bottom() > switch_limits.bottom() {
                 let switched = Bounds::from_anchor_and_size(
                     anchor.other_side_along(Axis::Vertical),
                     origin,
                     children_bounds.size,
                 );
-                if !(switched.top() < limits.top() || switched.bottom() > limits.bottom()) {
+                if !(switched.top() < switch_limits.top()
+                    || switched.bottom() > switch_limits.bottom())
+                {
                     desired = switched;
                 }
             }
         }
 
-        let client_inset = window.client_inset.unwrap_or(px(0.));
-        let edges = match self.fit_mode {
-            AnchoredFitMode::SnapToWindowWithMargin(edges) => edges,
-            _ => Edges::default(),
-        }
-        .map(|edge| *edge + client_inset);
+        let (fit_limits, edges) = match self.fit_mode {
+            AnchoredFitMode::SnapToWindowWithMargin(edges) => {
+                (limits, edges.map(|edge| *edge + client_inset))
+            }
+            AnchoredFitMode::SwitchAnchorWithMargin(_) => (switch_limits, Edges::default()),
+            _ => (limits, Edges::default()),
+        };
 
         // Snap the horizontal edges of the anchored element to the horizontal edges of the window if
         // its horizontal bounds overflow, aligning to the left if it is wider than the limits.
-        if desired.right() > limits.right() {
-            desired.origin.x -= desired.right() - limits.right() + edges.right;
+        if desired.right() > fit_limits.right() {
+            desired.origin.x -= desired.right() - fit_limits.right() + edges.right;
         }
-        if desired.left() < limits.left() {
-            desired.origin.x = limits.origin.x + edges.left;
+        if desired.left() < fit_limits.left() {
+            desired.origin.x = fit_limits.origin.x + edges.left;
         }
 
         // Snap the vertical edges of the anchored element to the vertical edges of the window if
         // its vertical bounds overflow, aligning to the top if it is taller than the limits.
-        if desired.bottom() > limits.bottom() {
-            desired.origin.y -= desired.bottom() - limits.bottom() + edges.bottom;
+        if desired.bottom() > fit_limits.bottom() {
+            desired.origin.y -= desired.bottom() - fit_limits.bottom() + edges.bottom;
         }
-        if desired.top() < limits.top() {
-            desired.origin.y = limits.origin.y + edges.top;
+        if desired.top() < fit_limits.top() {
+            desired.origin.y = fit_limits.origin.y + edges.top;
         }
 
         let offset = desired.origin - bounds.origin;
@@ -247,6 +275,9 @@ pub enum AnchoredFitMode {
     SnapToWindowWithMargin(Edges<Pixels>),
     /// Switch which corner anchor this anchored element is attached to.
     SwitchAnchor,
+    /// Switch anchor corners against the padded window boundary, then keep the
+    /// element inside that boundary if neither anchor corner fully fits.
+    SwitchAnchorWithMargin(Edges<Pixels>),
 }
 
 /// Which algorithm to use when positioning the anchored element.
