@@ -1291,12 +1291,12 @@ mod tests {
 
         let boundaries = layout.compute_wrap_boundaries(text, px(16.), None);
 
-        assert_eq!(boundaries.len(), 1);
-        assert_eq!(layout.runs[0].glyphs[boundaries[0].glyph_ix].index, 3);
         assert_eq!(
             wrapped_text_lines(text, &layout, &boundaries),
             ["aa ", "bb"]
         );
+        assert_eq!(boundaries.len(), 1);
+        assert_eq!(layout.runs[0].glyphs[boundaries[0].glyph_ix].index, 3);
     }
 
     #[test]
