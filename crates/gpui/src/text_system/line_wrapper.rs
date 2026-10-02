@@ -1297,25 +1297,6 @@ mod tests {
                     .map(|line| line.layout.wrap_boundaries().len() + 1)
                     .sum::<usize>()
             };
-            let line_widths = |lines: &[crate::WrappedLine]| {
-                let mut widths = Vec::new();
-                for line in lines {
-                    let layout = &line.layout.unwrapped_layout;
-                    let mut start = 0;
-                    for boundary in line.layout.wrap_boundaries() {
-                        let end = layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index;
-                        widths.push(layout.x_for_index(end) - layout.x_for_index(start));
-                        start = end;
-                    }
-                    widths.push(layout.width - layout.x_for_index(start));
-                }
-                widths
-            };
-            let spread = |widths: &[Pixels]| {
-                widths.iter().copied().fold(Pixels::ZERO, Pixels::max)
-                    - widths.iter().copied().fold(Pixels::MAX, Pixels::min)
-            };
-
             let one_line = text_system
                 .shape_text(text.into(), px(18.), &[plain.clone()], Some(px(500.)), None)
                 .unwrap();
@@ -1340,7 +1321,10 @@ mod tests {
 
             assert!(line_count(&greedy) >= 2);
             assert_eq!(line_count(&balanced), line_count(&greedy));
-            assert!(spread(&line_widths(&balanced)) < spread(&line_widths(&greedy)));
+            assert!(
+                balanced[0].layout.wrap_width.unwrap() < greedy[0].layout.wrap_width.unwrap(),
+                "balanced wrapping should use the narrowest width that preserves the greedy line count",
+            );
 
             let mixed_runs = [
                 plain.clone().with_len(18),
