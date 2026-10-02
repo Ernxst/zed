@@ -119,6 +119,12 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Preserves explicit newlines and repeated spaces while allowing soft wrapping.
+    fn whitespace_pre_wrap(mut self) -> Self {
+        self.text_style().white_space = Some(WhiteSpace::PreWrap);
+        self
+    }
+
     /// Balances wrapped text that fits within six lines.
     fn text_wrap_balance(mut self) -> Self {
         self.text_style().text_wrap = Some(TextWrap::Balance);

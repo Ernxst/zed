@@ -1205,7 +1205,7 @@ impl TextLayout {
 /// that splits React nodes it still reaches `shape_text` with its original
 /// newlines and repeated spaces intact.
 fn whitespace_soft_wraps(white_space: WhiteSpace) -> bool {
-    white_space == WhiteSpace::Normal
+    matches!(white_space, WhiteSpace::Normal | WhiteSpace::PreWrap)
 }
 
 fn first_line_baseline(lines: &[WrappedLine], line_height: Pixels) -> Option<Pixels> {
@@ -1598,5 +1598,6 @@ mod tests {
         assert!(whitespace_soft_wraps(WhiteSpace::Normal));
         assert!(!whitespace_soft_wraps(WhiteSpace::Nowrap));
         assert!(!whitespace_soft_wraps(WhiteSpace::Pre));
+        assert!(whitespace_soft_wraps(WhiteSpace::PreWrap));
     }
 }
