@@ -195,15 +195,16 @@ impl LineLayout {
 
     /// Walks the glyphs of this line in run/glyph order, classifying each one as a wrap
     /// candidate or not under the rule shared by greedy wrapping and min-content measurement:
-    /// a word character following a space is a candidate, as is any other non-space
-    /// character, but only once a non-whitespace glyph has been seen; newlines are never
-    /// candidates and do not update the word-boundary state.
+    /// a word character following a space or a hyphen between alphanumeric characters is a
+    /// candidate, as is any other non-space character, but only once a non-whitespace glyph
+    /// has been seen; newlines are never candidates and do not update word-boundary state.
     fn wrap_candidates<'a>(
         &'a self,
         text: &'a str,
     ) -> impl Iterator<Item = (WrapBoundary, char, Pixels, bool)> + 'a {
         let mut first_non_whitespace = false;
         let mut prev_ch = '\0';
+        let mut prev_prev_ch = '\0';
 
         self.runs
             .iter()
@@ -222,7 +223,11 @@ impl LineLayout {
                     return (boundary, ch, x, false);
                 }
 
-                let is_candidate = if LineWrapper::is_word_char(ch) {
+                let is_hyphen_break =
+                    ch.is_alphanumeric() && prev_ch == '-' && prev_prev_ch.is_alphanumeric();
+                let is_candidate = if is_hyphen_break {
+                    first_non_whitespace
+                } else if LineWrapper::is_word_char(ch) {
                     prev_ch == ' ' && ch != ' ' && first_non_whitespace
                 } else {
                     ch != ' ' && first_non_whitespace
@@ -231,6 +236,7 @@ impl LineLayout {
                 if ch != ' ' && !first_non_whitespace {
                     first_non_whitespace = true;
                 }
+                prev_prev_ch = prev_ch;
                 prev_ch = ch;
 
                 (boundary, ch, x, is_candidate)
@@ -1297,6 +1303,90 @@ mod tests {
         );
         assert_eq!(boundaries.len(), 1);
         assert_eq!(layout.runs[0].glyphs[boundaries[0].glyph_ix].index, 3);
+    }
+
+    #[test]
+    fn test_wrapping_preserves_repeated_spaces_before_the_next_word() {
+        let text = "aa  bb";
+        let mut layout = make_layout(
+            (0..text.len())
+                .map(|index| glyph_at(index as f32 * 8., index))
+                .collect(),
+        );
+        layout.width = px(48.);
+
+        let boundaries = layout.compute_wrap_boundaries(text, px(40.), None);
+
+        let lines = wrapped_text_lines(text, &layout, &boundaries);
+        println!("line strings: {lines:?}");
+        assert_eq!(lines, ["aa  ", "bb"]);
+    }
+
+    #[test]
+    fn test_wraps_after_hyphen_between_letters() {
+        let text = "Read 2026-01-01.";
+        let mut layout = make_layout(
+            (0..text.len())
+                .map(|index| glyph_at(index as f32 * 8., index))
+                .collect(),
+        );
+        layout.width = px(128.);
+
+        let boundaries = layout.compute_wrap_boundaries(text, px(80.), None);
+
+        let lines = wrapped_text_lines(text, &layout, &boundaries);
+        println!("line strings: {lines:?}");
+        assert_eq!(lines, ["Read 2026-", "01-01."]);
+    }
+
+    #[test]
+    fn test_wraps_after_hyphen_in_compound() {
+        let text = "x high-speed";
+        let mut layout = make_layout(
+            (0..text.len())
+                .map(|index| glyph_at(index as f32 * 8., index))
+                .collect(),
+        );
+        layout.width = px(96.);
+
+        let boundaries = layout.compute_wrap_boundaries(text, px(56.), None);
+
+        let lines = wrapped_text_lines(text, &layout, &boundaries);
+        println!("line strings: {lines:?}");
+        assert_eq!(lines, ["x high-", "speed"]);
+    }
+
+    #[test]
+    fn test_keeps_leading_negative_number_together() {
+        let text = "x -5";
+        let mut layout = make_layout(
+            (0..text.len())
+                .map(|index| glyph_at(index as f32 * 8., index))
+                .collect(),
+        );
+        layout.width = px(32.);
+
+        let boundaries = layout.compute_wrap_boundaries(text, px(24.), None);
+
+        assert_eq!(wrapped_text_lines(text, &layout, &boundaries), ["x ", "-5"]);
+    }
+
+    #[test]
+    fn test_date_breaks_after_hyphen_without_breaking_before_the_number() {
+        let text = "x 2026-10-02";
+        let mut layout = make_layout(
+            (0..text.len())
+                .map(|index| glyph_at(index as f32 * 8., index))
+                .collect(),
+        );
+        layout.width = px(96.);
+
+        let boundaries = layout.compute_wrap_boundaries(text, px(56.), None);
+
+        assert_eq!(
+            wrapped_text_lines(text, &layout, &boundaries),
+            ["x 2026-", "10-02"]
+        );
     }
 
     #[test]

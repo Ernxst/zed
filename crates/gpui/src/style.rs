@@ -528,6 +528,8 @@ pub enum WhiteSpace {
     Nowrap,
     /// Preserve explicit newlines and repeated spaces without soft wrapping.
     Pre,
+    /// Preserve explicit newlines and repeated spaces while allowing soft wrapping.
+    PreWrap,
 }
 
 /// How to choose soft wrap points when text has a definite width.
